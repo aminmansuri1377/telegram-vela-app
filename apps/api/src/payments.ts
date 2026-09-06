@@ -10,7 +10,7 @@ export async function telegram<T = unknown>(method: string, body: unknown): Prom
 export async function invoice(userId: string, body: unknown) { const { planId } = z.object({ planId: z.enum(['BASIC', 'PREMIUM', 'VIP']) }).parse(body); const plan = await db.plan.findUnique({ where: { id: planId } }); if (!plan?.active)
     fail('PLAN_UNAVAILABLE', 404); if (!process.env.TELEGRAM_BOT_TOKEN)
     fail('TELEGRAM_NOT_CONFIGURED', 503); const intent = await db.paymentIntent.create({ data: { userId, planId, stars: plan.stars, days: plan.days, expiresAt: new Date(Date.now() + 30 * 60000) } }); try {
-    const url = await telegram<string>('createInvoiceLink', { title: `Vela ${planId}`, description: `${plan.days} days of Vela membership. One-time purchase.`, payload: intent.id, currency: 'XTR', prices: [{ label: planId, amount: plan.stars }], provider_token: '' });
+    const url = await telegram<string>('createInvoiceLink', { title: `Kisser ${planId}`, description: `${plan.days} days of Kisser membership. One-time purchase.`, payload: intent.id, currency: 'XTR', prices: [{ label: planId, amount: plan.stars }], provider_token: '' });
     await db.paymentIntent.update({ where: { id: intent.id }, data: { invoiceUrl: url } });
     return { id: intent.id, url };
 }
@@ -60,7 +60,7 @@ export async function webhook(raw: unknown) {
     const m = update.message;
     if (m?.text && m.from && ['/start', '/terms', '/privacy', '/support', '/paysupport'].includes(m.text.split(' ')[0])) {
         const cmd = m.text.split(' ')[0];
-        await telegram('sendMessage', { chat_id: m.chat.id, text: cmd === '/start' ? 'Welcome to Vela. Open the app to continue (18+).' : cmd === '/terms' || cmd === '/privacy' ? `${process.env.TELEGRAM_WEBAPP_URL}/?legal=${cmd.slice(1)}` : `Payment and safety support: ${process.env.SUPPORT_URL || 'Contact the bot owner.'}`, ...(cmd === '/start' ? { reply_markup: { inline_keyboard: [[{ text: 'Open Vela', web_app: { url: process.env.TELEGRAM_WEBAPP_URL } }]] } } : {}) });
+        await telegram('sendMessage', { chat_id: m.chat.id, text: cmd === '/start' ? 'Welcome to Kisser. Open the app to continue (18+).' : cmd === '/terms' || cmd === '/privacy' ? `${process.env.TELEGRAM_WEBAPP_URL}/?legal=${cmd.slice(1)}` : `Payment and safety support: ${process.env.SUPPORT_URL || 'Contact the bot owner.'}`, ...(cmd === '/start' ? { reply_markup: { inline_keyboard: [[{ text: 'Open Kisser', web_app: { url: process.env.TELEGRAM_WEBAPP_URL } }]] } } : {}) });
     }
     return { ok: true };
 }

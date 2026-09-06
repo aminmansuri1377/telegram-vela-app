@@ -53,6 +53,8 @@ model Profile {
   country         String
   languages       String[]
   interests       String[]
+  fetish          String   @default("")
+  showFetish      Boolean  @default(false)
   goal            String   @default("DATING")
   visible         Boolean  @default(true)
   minAge          Int      @default(18)

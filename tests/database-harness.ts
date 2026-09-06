@@ -3,12 +3,13 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '@prisma/client';
 import { Pool } from 'pg';
 import { EventEmitter } from 'node:events';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 // Test-only real PostgreSQL WASM queries, no sockets or external credentials.
 // PGlite serializes sessions; multi-connection race testing still requires PostgreSQL.
 export async function databaseHarness() {
     const pg = await PGlite.create();
-    await pg.exec(await readFile('prisma/migrations/202609050001_initial/migration.sql', 'utf8'));
+    for (const migration of (await readdir('prisma/migrations', { withFileTypes: true })).filter(x => x.isDirectory()).map(x => x.name).sort())
+        await pg.exec(await readFile(`prisma/migrations/${migration}/migration.sql`, 'utf8'));
     const oids = (await pg.query<{
         oid: number;
     }>('SELECT oid FROM pg_type')).rows.map(x => x.oid);

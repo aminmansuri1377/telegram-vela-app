@@ -50,7 +50,7 @@ class Errors implements ExceptionFilter {
     catch(error: unknown, host: ArgumentsHost) { const res = host.switchToHttp().getResponse<Response>(); const req = host.switchToHttp().getRequest<Request>(); const status = error instanceof ZodError ? 400 : error instanceof HttpException ? error.getStatus() : 500; const response = error instanceof HttpException ? error.getResponse() : null; const code = error instanceof ZodError ? 'VALIDATION_ERROR' : typeof response === 'object' && response && 'code' in response ? response.code : 'SERVER_ERROR'; if (status >= 500)
         process.stderr.write(JSON.stringify({ event: 'request_failed', requestId: req.headers['x-request-id'], path: req.path, status }) + '\n'); res.status(status).json({ code, requestId: req.headers['x-request-id'], ...(error instanceof ZodError ? { fields: error.issues.map(x => ({ path: x.path.join('.'), code: x.code })) } : {}) }); }
 }
-@ApiTags('Vela')
+@ApiTags('Kisser')
 @Controller('api/v1')
 class Api {
     @Get('health')
@@ -284,7 +284,7 @@ export async function createApp() {
     app.useGlobalFilters(new Errors());
     app.use((req: Request, res: Response, next: NextFunction) => { req.headers['x-request-id'] = randomUUID(); res.setHeader('x-request-id', String(req.headers['x-request-id'])); res.setHeader('cache-control', 'no-store'); rate(`ip:${req.ip}`, 300, 60).then(() => next()).catch(() => res.status(429).json({ code: 'RATE_LIMIT' })); });
     if (process.env.SERVE_WEB === 'true') app.use(webMiddleware());
-    const doc = SwaggerModule.createDocument(app, new DocumentBuilder().setTitle('Vela API').setVersion('1.0').addCookieAuth(auth.cookieName).build());
+    const doc = SwaggerModule.createDocument(app, new DocumentBuilder().setTitle('Kisser API').setVersion('1.0').addCookieAuth(auth.cookieName).build());
     if (process.env.NODE_ENV !== 'production')
         SwaggerModule.setup('api/docs', app, doc);
     const io = new Server(app.getHttpServer(), { cors: { origin: process.env.FRONTEND_URL, credentials: true }, maxHttpBufferSize: 4096 });

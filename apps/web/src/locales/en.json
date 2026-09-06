@@ -15,7 +15,7 @@
   "profile": "Your space",
   "settings": "Settings",
   "filters": "Preferences",
-  "premium": "Vela Plus",
+  "premium": "Kisser Plus",
   "close": "Close",
   "save": "Save changes",
   "cancel": "Cancel",
@@ -172,5 +172,9 @@
   "dau": "Daily active",
   "mau": "Monthly active",
   "matches": "Matches",
-  "messages": "Messages"
+  "messages": "Messages",
+  "fetish": "Fetish / intimate preferences (optional)",
+  "fetishHint": "Optional, up to 300 characters. Hidden from other users unless you enable sharing. Sharing preferences never implies consent.",
+  "showFetish": "Show these preferences on my profile",
+  "CASUAL": "Casual dating"
 }

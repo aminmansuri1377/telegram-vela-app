@@ -3,7 +3,7 @@ import { db } from './db';
 import { storage } from './profiles';
 import { telegram } from './payments';
 import type { Outbox } from '@prisma/client';
-const matchTexts: Record<string, string> = { en: 'You have a new match on Vela.', zh: '你在 Vela 有新的配对。', ru: 'У вас новая пара в Vela.', hi: 'Vela पर आपका नया मैच है।', ur: 'Vela پر آپ کا نیا میچ ہے۔', fa: 'در Vela یک مچ جدید دارید.', ar: 'لديك تطابق جديد في Vela.', tr: 'Vela’da yeni bir eşleşmeniz var.', es: 'Tienes una nueva conexión en Vela.', de: 'Du hast ein neues Match auf Vela.', it: 'Hai un nuovo match su Vela.' };
+const matchTexts: Record<string, string> = { en: 'You have a new match on Kisser.', zh: '你在 Kisser 有新的配对。', ru: 'У вас новая пара в Kisser.', hi: 'Kisser पर आपका नया मैच है।', ur: 'Kisser پر آپ کا نیا میچ ہے۔', fa: 'در Kisser یک مچ جدید دارید.', ar: 'لديك تطابق جديد في Kisser.', tr: 'Kisser’da yeni bir eşleşmeniz var.', es: 'Tienes una nueva conexión en Kisser.', de: 'Du hast ein neues Match auf Kisser.', it: 'Hai un nuovo match su Kisser.' };
 export async function tick() {
     const jobs = await db.$queryRaw<Outbox[]> `UPDATE "Outbox" SET "lockedAt"=NOW() WHERE id IN (SELECT id FROM "Outbox" WHERE "runAt"<=NOW() AND ("lockedAt" IS NULL OR "lockedAt"<NOW()-INTERVAL '5 minutes') ORDER BY "runAt" LIMIT 20 FOR UPDATE SKIP LOCKED) RETURNING *`;
     for (const job of jobs) {
