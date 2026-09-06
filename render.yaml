@@ -1,0 +1,59 @@
+# Run from the repository root containing package.json.
+# Staging configuration: free services sleep and are not production payment infrastructure.
+services:
+  - type: web
+    name: vela-staging
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm ci --include=dev && npm run db:generate && npm run build
+    startCommand: npm run start:render
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+      - key: SERVE_WEB
+        value: "true"
+      - key: OUTBOX_IN_PROCESS
+        value: "true"
+      - key: APPLY_MIGRATIONS
+        value: "false"
+      - key: TRUST_PROXY
+        value: "1"
+      - key: DEV_LOGIN_ENABLED
+        value: "false"
+      - key: VITE_DEV_LOGIN_ENABLED
+        value: "false"
+      - key: TELEGRAM_TEST_ENV
+        value: "false"
+      - key: TELEGRAM_WEBHOOK_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false
+      - key: DIRECT_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        value: dating-app-photos
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: ADMIN_TELEGRAM_IDS
+        sync: false
+      - key: SUPPORT_URL
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          name: vela-staging-cache
+          type: keyvalue
+          property: connectionString
+  - type: keyvalue
+    name: vela-staging-cache
+    plan: free
+    region: frankfurt
+    ipAllowList: []
+    maxmemoryPolicy: allkeys-lru

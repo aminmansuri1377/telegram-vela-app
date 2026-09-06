@@ -1,0 +1,19 @@
+{$APP_DOMAIN} {
+  handle /api/* {
+    reverse_proxy api:3001
+  }
+  handle /socket.io/* {
+    reverse_proxy api:3001
+  }
+  handle {
+    root * /srv
+    try_files {path} /index.html
+    file_server
+  }
+  header {
+    X-Content-Type-Options nosniff
+    Referrer-Policy no-referrer
+    Permissions-Policy "geolocation=(self)"
+    Content-Security-Policy "default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' https://*.supabase.co data: blob:; connect-src 'self' wss:; frame-ancestors https://web.telegram.org https://*.telegram.org; base-uri 'self'; form-action 'self'"
+  }
+}

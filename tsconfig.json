@@ -1,0 +1,1 @@
+{"extends":"./apps/api/tsconfig.json","compilerOptions":{"noEmit":true,"rootDir":".","types":["node","multer"]},"include":["apps/api/src","packages","prisma/seed.ts","scripts/**/*.ts","tests/**/*.ts"]}

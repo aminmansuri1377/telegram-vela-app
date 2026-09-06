@@ -1,0 +1,237 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id             String          @id @default(uuid()) @db.Uuid
+  telegramId     String          @unique
+  username       String?
+  firstName      String
+  locale         String          @default("en")
+  role           String          @default("USER")
+  banned         Boolean         @default(false)
+  isTest         Boolean         @default(false)
+  notifications  Boolean         @default(false)
+  termsVersion   String?
+  termsAt        DateTime?
+  premiumUntil   DateTime?
+  lastActive     DateTime        @default(now())
+  createdAt      DateTime        @default(now())
+  profile        Profile?
+  sessions       Session[]
+  photos         Photo[]
+  sent           Swipe[]         @relation("sent")
+  received       Swipe[]         @relation("received")
+  conversationsA Conversation[]  @relation("a")
+  conversationsB Conversation[]  @relation("b")
+  messages       Message[]
+  blocks         Block[]         @relation("blocker")
+  blockedBy      Block[]         @relation("blocked")
+  reports        Report[]        @relation("reporter")
+  reported       Report[]        @relation("reported")
+  payments       PaymentIntent[]
+  usage          DailyUsage[]
+
+  @@index([lastActive])
+}
+
+model Profile {
+  userId          String   @id @db.Uuid
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  displayName     String
+  birthDate       DateTime @db.Date
+  gender          String
+  interestedIn    String[]
+  bio             String   @default("")
+  city            String
+  country         String
+  languages       String[]
+  interests       String[]
+  goal            String   @default("DATING")
+  visible         Boolean  @default(true)
+  minAge          Int      @default(18)
+  maxAge          Int      @default(60)
+  maxDistance     Int      @default(500)
+  latitude        Float?
+  longitude       Float?
+  filterLanguages String[] @default([])
+  filterInterests String[] @default([])
+  filterGoal      String?
+  updatedAt       DateTime @updatedAt
+
+  @@index([visible, gender])
+}
+
+model Session {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  csrf      String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model AuthReplay {
+  hash      String   @id
+  browserHash String
+  expiresAt DateTime
+}
+
+model Photo {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  path      String   @unique
+  position  Int      @default(0)
+  status    String   @default("PENDING")
+  purpose   String   @default("PROFILE")
+  createdAt DateTime @default(now())
+
+  @@index([userId, purpose, position])
+}
+
+model Swipe {
+  fromId    String   @db.Uuid
+  toId      String   @db.Uuid
+  from      User     @relation("sent", fields: [fromId], references: [id], onDelete: Cascade)
+  to        User     @relation("received", fields: [toId], references: [id], onDelete: Cascade)
+  kind      String
+  createdAt DateTime @default(now())
+
+  @@id([fromId, toId])
+  @@index([toId, kind])
+}
+
+model Conversation {
+  id        String    @id @default(uuid()) @db.Uuid
+  aId       String    @db.Uuid
+  bId       String    @db.Uuid
+  a         User      @relation("a", fields: [aId], references: [id], onDelete: Cascade)
+  b         User      @relation("b", fields: [bId], references: [id], onDelete: Cascade)
+  active    Boolean   @default(true)
+  startedBy String?   @db.Uuid
+  startedAt DateTime?
+  readAAt   DateTime?
+  readBAt   DateTime?
+  createdAt DateTime  @default(now())
+  messages  Message[]
+
+  @@unique([aId, bId])
+  @@index([bId, active])
+}
+
+model Message {
+  id             String       @id @default(uuid()) @db.Uuid
+  conversationId String       @db.Uuid
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderId       String       @db.Uuid
+  sender         User         @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  body           String
+  photoId        String?      @db.Uuid
+  clientId       String       @db.Uuid
+  createdAt      DateTime     @default(now())
+
+  @@unique([senderId, clientId])
+  @@index([conversationId, createdAt, id])
+}
+
+model DailyUsage {
+  userId String @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  day    String
+  starts Int    @default(0)
+
+  @@id([userId, day])
+}
+
+model Block {
+  fromId    String   @db.Uuid
+  toId      String   @db.Uuid
+  from      User     @relation("blocker", fields: [fromId], references: [id], onDelete: Cascade)
+  to        User     @relation("blocked", fields: [toId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@id([fromId, toId])
+}
+
+model Report {
+  id        String   @id @default(uuid()) @db.Uuid
+  fromId    String   @db.Uuid
+  toId      String   @db.Uuid
+  from      User     @relation("reporter", fields: [fromId], references: [id], onDelete: Cascade)
+  to        User     @relation("reported", fields: [toId], references: [id], onDelete: Cascade)
+  reason    String
+  note      String   @default("")
+  status    String   @default("OPEN")
+  adminNote String   @default("")
+  createdAt DateTime @default(now())
+
+  @@index([status, createdAt])
+}
+
+model Plan {
+  id       String          @id
+  stars    Int
+  days     Int
+  active   Boolean         @default(true)
+  payments PaymentIntent[]
+}
+
+model PaymentIntent {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String?   @db.Uuid
+  user       User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  planId     String
+  plan       Plan      @relation(fields: [planId], references: [id])
+  stars      Int
+  days       Int
+  status     String    @default("PENDING")
+  chargeId   String?   @unique
+  invoiceUrl String?
+  expiresAt  DateTime
+  paidAt     DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model Policy {
+  gender      String  @id
+  dailyStarts Int
+  seeLikes    Boolean
+}
+
+model Content {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+model AuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  actor     String
+  action    String
+  target    String
+  createdAt DateTime @default(now())
+}
+
+model Outbox {
+  id        String    @id @default(uuid()) @db.Uuid
+  kind      String
+  payload   Json
+  attempts  Int       @default(0)
+  runAt     DateTime  @default(now())
+  lockedAt  DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([runAt])
+}
