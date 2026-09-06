@@ -1,5 +1,67 @@
-import 'dotenv/config';
-import { telegram } from '../apps/api/src/payments';
-async function run() { const url = process.env.TELEGRAM_WEBAPP_URL; const secret = process.env.TELEGRAM_WEBHOOK_SECRET; if (!url?.startsWith('https://') || !secret || !/^[A-Za-z0-9_-]{16,256}$/.test(secret))
-    throw new Error('Configure HTTPS URL and a 16+ character webhook secret'); const backend = process.env.PUBLIC_API_URL || url; await telegram('setWebhook', { url: `${backend}/api/v1/telegram/webhook`, secret_token: secret, allowed_updates: ['message', 'pre_checkout_query'], drop_pending_updates: false }); await telegram('setChatMenuButton', { menu_button: { type: 'web_app', text: 'Open Kisser', web_app: { url } } }); await telegram('setMyCommands', { commands: [{ command: 'start', description: 'Open Kisser (18+)' }, { command: 'terms', description: 'Terms of service' }, { command: 'privacy', description: 'Privacy policy' }, { command: 'support', description: 'Contact support' }, { command: 'paysupport', description: 'Payment support' }] }); console.log('Webhook, menu button and commands configured.'); }
-run().catch(() => { console.error('Bot setup failed. Check configuration and Bot API connectivity.'); process.exitCode = 1; });
+import { config } from 'dotenv';
+import { resolve } from 'node:path';
+config({ path: resolve(__dirname, '../.env') });
+let stage = 'configuration';
+class SetupError extends Error {}
+function httpsUrl(value: string | undefined, name: string) {
+    try {
+        const url = new URL(value || '');
+        if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash)
+            throw new Error();
+        return url.toString().replace(/\/$/, '');
+    } catch { throw new SetupError(`${name} must be a valid HTTPS URL without credentials, query or fragment.`); }
+}
+async function run() {
+    const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
+    const secret = process.env.TELEGRAM_WEBHOOK_SECRET?.trim();
+    const url = httpsUrl(process.env.TELEGRAM_WEBAPP_URL, 'TELEGRAM_WEBAPP_URL');
+    const backend = httpsUrl(process.env.PUBLIC_API_URL || url, 'PUBLIC_API_URL');
+    if (!token || !/^\d+:[A-Za-z0-9_-]+$/.test(token))
+        throw new SetupError('TELEGRAM_BOT_TOKEN is missing or malformed. Copy the full token from BotFather into .env.');
+    if (!secret || !/^[A-Za-z0-9_-]{16,256}$/.test(secret))
+        throw new SetupError('TELEGRAM_WEBHOOK_SECRET must contain 16-256 letters, digits, underscores or hyphens.');
+    const call = async (method: string, body: unknown = {}) => {
+        stage = method;
+        let res: Response;
+        try {
+            res = await fetch(`https://api.telegram.org/bot${token}/${process.env.TELEGRAM_TEST_ENV === 'true' ? 'test/' : ''}${method}`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body), signal: AbortSignal.timeout(20000),
+            });
+        } catch (error: unknown) {
+            const e = error as { name?: string; cause?: { code?: string } };
+            const code = e.cause?.code || e.name || '';
+            const allowed = ['ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'TimeoutError', 'AbortError', 'CERT_HAS_EXPIRED', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'];
+            throw new SetupError(`Network failure [${allowed.includes(code) ? code : 'FETCH_FAILED'}]. Node could not reach Telegram API. Check VPN/proxy routing, DNS and firewall on this computer.`);
+        }
+        let json: { ok?: boolean; error_code?: number; result?: { url?: string } };
+        try { json = await res.json(); }
+        catch { throw new SetupError(`HTTP ${res.status}: response was not JSON. Check the network/proxy.`); }
+        if (!res.ok || !json.ok) {
+            const code = Number(json.error_code || res.status);
+            const hints: Record<number, string> = {
+                401: 'Token rejected. Use the latest BotFather token and check TELEGRAM_TEST_ENV.',
+                404: 'Bot endpoint not found. Check the token and TELEGRAM_TEST_ENV.',
+                400: 'Telegram rejected the parameters. For setWebhook, check the public HTTPS address and its DNS.',
+                403: 'Telegram denied this operation for the bot.',
+                429: 'Telegram rate limit. Wait before retrying.',
+            };
+            throw new SetupError(`Telegram API ${code}: ${hints[code] || 'Telegram API returned an error. Retry later.'}`);
+        }
+        console.log(`${method}: OK`);
+        return json.result;
+    };
+    // Probe token/network before changing webhook or menu configuration.
+    await call('getMe');
+    const webhookUrl = `${backend}/api/v1/telegram/webhook`;
+    await call('setWebhook', { url: webhookUrl, secret_token: secret, allowed_updates: ['message', 'pre_checkout_query'], drop_pending_updates: false });
+    await call('setChatMenuButton', { menu_button: { type: 'web_app', text: 'Open Kisser', web_app: { url } } });
+    await call('setMyCommands', { commands: [{ command: 'start', description: 'Open Kisser (18+)' }, { command: 'terms', description: 'Terms of service' }, { command: 'privacy', description: 'Privacy policy' }, { command: 'support', description: 'Contact support' }, { command: 'paysupport', description: 'Payment support' }] });
+    const info = await call('getWebhookInfo');
+    if (info?.url !== webhookUrl) throw new SetupError('Registered webhook URL does not match the requested URL.');
+    console.log('Webhook, menu button and commands configured.');
+}
+run().catch((error: unknown) => {
+    console.error(`Bot setup failed at ${stage}: ${error instanceof SetupError ? error.message : 'Unexpected local error. Check dependencies and configuration; raw details are hidden to protect secrets.'}`);
+    process.exitCode = 1;
+});

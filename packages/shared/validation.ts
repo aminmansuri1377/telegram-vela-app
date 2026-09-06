@@ -28,3 +28,13 @@ export function distanceKm(a: {
     longitude: number | null;
 }) { if (a.latitude === null || a.longitude === null || b.latitude === null || b.longitude === null)
     return null; const r = Math.PI / 180, dLat = (b.latitude - a.latitude) * r, dLon = (b.longitude - a.longitude) * r; const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.latitude * r) * Math.cos(b.latitude * r) * Math.sin(dLon / 2) ** 2; return 6371 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(Math.max(0, 1 - h))); }
+
+export const filterSchema = z.object({
+    interestedIn: z.array(z.enum(genders)).min(1).max(3),
+    minAge: z.number().int().min(18).max(100), maxAge: z.number().int().min(18).max(100),
+    maxDistance: z.number().int().min(1).max(20000),
+    latitude: z.number().min(-90).max(90).nullable(), longitude: z.number().min(-180).max(180).nullable(),
+    filterLanguages: z.array(z.enum(locales)).max(11),
+    filterInterests: z.array(z.string().trim().min(1).max(30)).max(12),
+    filterGoal: z.enum(goals).nullable(),
+}).strict().refine(p => p.minAge <= p.maxAge, 'AGE_RANGE').refine(p => (p.latitude === null) === (p.longitude === null), 'LOCATION_PAIR');

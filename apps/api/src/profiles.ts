@@ -4,13 +4,28 @@ import { ageAt, entitlement, distanceKm, profileSchema, locales } from '../../..
 import { z } from 'zod';
 import { createClient } from '@supabase/supabase-js';
 import sharp from 'sharp';
+import { storageFailure } from './storage-errors';
+import { filterSchema } from '../../../packages/shared/validation';
 import { randomUUID } from 'node:crypto';
 import type { Prisma, User, Profile, Photo } from '@prisma/client';
-export function storage() { if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY)
-    fail('STORAGE_NOT_CONFIGURED', 503); return createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } }).storage.from(process.env.SUPABASE_STORAGE_BUCKET || 'dating-app-photos'); }
+export function storage() {
+    const url = process.env.SUPABASE_URL?.trim();
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+    if (!url || !key) fail('STORAGE_NOT_CONFIGURED', 503);
+    try {
+        const parsed = new URL(url!);
+        if (parsed.protocol !== 'https:' || parsed.pathname !== '/' || parsed.search || parsed.hash || parsed.username || parsed.password)
+            throw new Error();
+    } catch { fail('STORAGE_CONFIG_INVALID', 503); }
+    try {
+        return createClient(url!, key!, {
+            auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+            global: { fetch: (input, init) => fetch(input, { ...init, signal: AbortSignal.timeout(30000) }) },
+        }).storage.from(process.env.SUPABASE_STORAGE_BUCKET?.trim() || 'dating-app-photos');
+    } catch { fail('STORAGE_CONFIG_INVALID', 503); }
+}
 export async function photoUrl(photo: Photo) { if (photo.path.startsWith('seed:'))
-    return photo.path; const { data, error } = await storage().createSignedUrl(photo.path, 300); if (error)
-    fail('STORAGE_ERROR', 503); return data.signedUrl; }
+    return photo.path; const { data, error } = await storage().createSignedUrl(photo.path, 300); if (error) storageFailure(error); return data.signedUrl; }
 export async function policyFor(user: User & {
     profile: Profile | null;
 }, tx: Tx = db) { const p = await tx.policy.findUnique({ where: { gender: user.profile?.gender || 'OTHER' } }); return entitlement(user.profile?.gender || 'OTHER', user.premiumUntil, p || { dailyStarts: 3, seeLikes: false }); }
@@ -57,9 +72,10 @@ export async function upload(userId: string, file: Express.Multer.File | undefin
     }
     const path = `${userId}/${randomUUID()}.webp`;
     const bucket = storage();
-    const { error } = await bucket.upload(path, image, { contentType: 'image/webp', upsert: false });
-    if (error)
-        fail('STORAGE_ERROR', 503);
+    let result;
+    try { result = await bucket.upload(path, image, { contentType: 'image/webp', upsert: false }); }
+    catch (error) { storageFailure(error); }
+    if (result.error) storageFailure(result.error);
     try {
         return await db.$transaction(async (tx) => { await lockUsers(tx, [userId]); const count = await tx.photo.count({ where: { userId, purpose } }); if (purpose === 'PROFILE' && count >= 6)
             fail('PHOTO_LIMIT'); return tx.photo.create({ data: { userId, path, purpose, position: count, status: purpose === 'CHAT' ? 'APPROVED' : 'PENDING' } }); });
@@ -76,3 +92,14 @@ export async function orderPhotos(userId: string, body: unknown) { const { ids }
     await tx.photo.update({ where: { id: ids[i] }, data: { position: i } }); return { ok: true }; }); }
 export async function deleteAccount(userId: string, txInput?: Prisma.TransactionClient) { const work = async (tx: Tx) => { await lockUsers(tx, [userId]); const photos = await tx.photo.findMany({ where: { userId } }); for (const p of photos)
     await tx.outbox.create({ data: { kind: 'DELETE_PHOTO', payload: { path: p.path } } }); const u = await tx.user.findUniqueOrThrow({ where: { id: userId } }); await tx.outbox.deleteMany({ where: { kind: 'NOTIFY', payload: { path: ['telegramId'], equals: u.telegramId } } }); await tx.user.delete({ where: { id: userId } }); return { ok: true }; }; return txInput ? work(txInput) : db.$transaction(work); }
+
+export async function saveFilters(userId: string, body: unknown) {
+    const filters = filterSchema.parse(body);
+    return db.$transaction(async tx => {
+        await lockUsers(tx, [userId]);
+        const p = await tx.profile.findUnique({ where: { userId } });
+        if (!p) fail('PROFILE_INCOMPLETE', 409);
+        await tx.profile.update({ where: { userId }, data: filters });
+        return { ok: true };
+    });
+}

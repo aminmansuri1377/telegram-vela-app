@@ -176,5 +176,14 @@
   "fetish": "Fetish / intimate preferences (optional)",
   "fetishHint": "Optional, up to 300 characters. Hidden from other users unless you enable sharing. Sharing preferences never implies consent.",
   "showFetish": "Show these preferences on my profile",
-  "CASUAL": "Casual dating"
+  "CASUAL": "Casual dating",
+  "photoTooLarge": "Photo is too large. Choose a file under 25 MB.",
+  "photoInvalid": "Cannot read this photo. Choose JPEG, PNG or WebP.",
+  "photoLimit": "You can add up to 6 profile photos.",
+  "uploadNetwork": "Upload connection failed. Check your internet and try again.",
+  "storageConfig": "Photo storage address is invalid. Contact support.",
+  "storageBucket": "Photo storage bucket was not found. Contact support.",
+  "storageAccess": "Photo storage access was denied. Contact support.",
+  "storageType": "Photo storage must allow WebP images. Contact support.",
+  "storageNetwork": "Photo storage is unavailable. Try again shortly."
 }

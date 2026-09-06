@@ -1,0 +1,566 @@
+--- a/apps/api/src/main.ts
++++ b/apps/api/src/main.ts
+@@ -47,8 +47,8 @@
+ async function session(req: Request, write = false) { const s = await auth.requireSession(req, write); await rate(`user:${s.userId}`, 180, 60); return s; }
+ @Catch()
+ class Errors implements ExceptionFilter {
+-    catch(error: unknown, host: ArgumentsHost) { const res = host.switchToHttp().getResponse<Response>(); const req = host.switchToHttp().getRequest<Request>(); const status = error instanceof ZodError ? 400 : error instanceof HttpException ? error.getStatus() : 500; const response = error instanceof HttpException ? error.getResponse() : null; const code = error instanceof ZodError ? 'VALIDATION_ERROR' : typeof response === 'object' && response && 'code' in response ? response.code : 'SERVER_ERROR'; if (status >= 500)
+-        process.stderr.write(JSON.stringify({ event: 'request_failed', requestId: req.headers['x-request-id'], path: req.path, status }) + '\n'); res.status(status).json({ code, requestId: req.headers['x-request-id'], ...(error instanceof ZodError ? { fields: error.issues.map(x => ({ path: x.path.join('.'), code: x.code })) } : {}) }); }
++    catch(error: unknown, host: ArgumentsHost) { const res = host.switchToHttp().getResponse<Response>(); const req = host.switchToHttp().getRequest<Request>(); const status = error instanceof ZodError ? 400 : error instanceof HttpException ? error.getStatus() : 500; const response = error instanceof HttpException ? error.getResponse() : null; const code = status === 413 ? 'IMAGE_TOO_LARGE' : error instanceof ZodError ? 'VALIDATION_ERROR' : typeof response === 'object' && response && 'code' in response ? response.code : 'SERVER_ERROR'; if (status >= 500)
++        process.stderr.write(JSON.stringify({ event: 'request_failed', requestId: req.headers['x-request-id'], path: req.path, status, code }) + '\n'); res.status(status).json({ code, requestId: req.headers['x-request-id'], ...(error instanceof ZodError ? { fields: error.issues.map(x => ({ path: x.path.join('.'), code: x.code })) } : {}) }); }
+ }
+ @ApiTags('Kisser')
+ @Controller('api/v1')
+@@ -108,6 +108,8 @@
+     b: unknown, 
+     @Res({ passthrough: true })
+     res: Response) { const s = await session(req, true); z.object({ confirm: z.literal('DELETE') }).parse(b); await profiles.deleteAccount(s.userId); res.clearCookie(auth.cookieName, { path: '/' }); return { ok: true }; }
++    @Put('profile/filters')
++    async filters(@Req() req: Request, @Body() body: unknown) { return profiles.saveFilters((await session(req, true)).userId, body); }
+     @Post('photos')
+     @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 1 } }))
+     async upload(
+--- a/apps/api/src/profiles.ts
++++ b/apps/api/src/profiles.ts
+@@ -4,13 +4,28 @@
+ import { z } from 'zod';
+ import { createClient } from '@supabase/supabase-js';
+ import sharp from 'sharp';
++import { storageFailure } from './storage-errors';
++import { filterSchema } from '../../../packages/shared/validation';
+ import { randomUUID } from 'node:crypto';
+ import type { Prisma, User, Profile, Photo } from '@prisma/client';
+-export function storage() { if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY)
+-    fail('STORAGE_NOT_CONFIGURED', 503); return createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } }).storage.from(process.env.SUPABASE_STORAGE_BUCKET || 'dating-app-photos'); }
++export function storage() {
++    const url = process.env.SUPABASE_URL?.trim();
++    const key = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
++    if (!url || !key) fail('STORAGE_NOT_CONFIGURED', 503);
++    try {
++        const parsed = new URL(url!);
++        if (parsed.protocol !== 'https:' || parsed.pathname !== '/' || parsed.search || parsed.hash || parsed.username || parsed.password)
++            throw new Error();
++    } catch { fail('STORAGE_CONFIG_INVALID', 503); }
++    try {
++        return createClient(url!, key!, {
++            auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
++            global: { fetch: (input, init) => fetch(input, { ...init, signal: AbortSignal.timeout(30000) }) },
++        }).storage.from(process.env.SUPABASE_STORAGE_BUCKET?.trim() || 'dating-app-photos');
++    } catch { fail('STORAGE_CONFIG_INVALID', 503); }
++}
+ export async function photoUrl(photo: Photo) { if (photo.path.startsWith('seed:'))
+-    return photo.path; const { data, error } = await storage().createSignedUrl(photo.path, 300); if (error)
+-    fail('STORAGE_ERROR', 503); return data.signedUrl; }
++    return photo.path; const { data, error } = await storage().createSignedUrl(photo.path, 300); if (error) storageFailure(error); return data.signedUrl; }
+ export async function policyFor(user: User & {
+     profile: Profile | null;
+ }, tx: Tx = db) { const p = await tx.policy.findUnique({ where: { gender: user.profile?.gender || 'OTHER' } }); return entitlement(user.profile?.gender || 'OTHER', user.premiumUntil, p || { dailyStarts: 3, seeLikes: false }); }
+@@ -57,9 +72,10 @@
+     }
+     const path = `${userId}/${randomUUID()}.webp`;
+     const bucket = storage();
+-    const { error } = await bucket.upload(path, image, { contentType: 'image/webp', upsert: false });
+-    if (error)
+-        fail('STORAGE_ERROR', 503);
++    let result;
++    try { result = await bucket.upload(path, image, { contentType: 'image/webp', upsert: false }); }
++    catch (error) { storageFailure(error); }
++    if (result.error) storageFailure(result.error);
+     try {
+         return await db.$transaction(async (tx) => { await lockUsers(tx, [userId]); const count = await tx.photo.count({ where: { userId, purpose } }); if (purpose === 'PROFILE' && count >= 6)
+             fail('PHOTO_LIMIT'); return tx.photo.create({ data: { userId, path, purpose, position: count, status: purpose === 'CHAT' ? 'APPROVED' : 'PENDING' } }); });
+@@ -76,3 +92,14 @@
+     await tx.photo.update({ where: { id: ids[i] }, data: { position: i } }); return { ok: true }; }); }
+ export async function deleteAccount(userId: string, txInput?: Prisma.TransactionClient) { const work = async (tx: Tx) => { await lockUsers(tx, [userId]); const photos = await tx.photo.findMany({ where: { userId } }); for (const p of photos)
+     await tx.outbox.create({ data: { kind: 'DELETE_PHOTO', payload: { path: p.path } } }); const u = await tx.user.findUniqueOrThrow({ where: { id: userId } }); await tx.outbox.deleteMany({ where: { kind: 'NOTIFY', payload: { path: ['telegramId'], equals: u.telegramId } } }); await tx.user.delete({ where: { id: userId } }); return { ok: true }; }; return txInput ? work(txInput) : db.$transaction(work); }
++
++export async function saveFilters(userId: string, body: unknown) {
++    const filters = filterSchema.parse(body);
++    return db.$transaction(async tx => {
++        await lockUsers(tx, [userId]);
++        const p = await tx.profile.findUnique({ where: { userId } });
++        if (!p) fail('PROFILE_INCOMPLETE', 409);
++        await tx.profile.update({ where: { userId }, data: filters });
++        return { ok: true };
++    });
++}
+--- /dev/null
++++ b/apps/api/src/storage-errors.ts
+@@ -0,0 +1,15 @@
++import { fail } from './security';
++export function storageFailure(error: unknown): never {
++    const e = error as { statusCode?: string | number; status?: number; message?: string; name?: string };
++    const status = Number(e?.statusCode || e?.status || 0);
++    const message = String(e?.message || '').toLowerCase();
++    const code = message.includes('bucket') && (message.includes('not found') || message.includes('does not exist')) ? 'STORAGE_BUCKET_MISSING'
++        : status === 401 || status === 403 || /jwt|signature|row.level|unauthorized|invalid.*key/.test(message) ? 'STORAGE_ACCESS_DENIED'
++        : status === 413 || /maximum allowed size|too large/.test(message) ? 'IMAGE_TOO_LARGE'
++        : /mime|content.type/.test(message) ? 'STORAGE_TYPE_REJECTED'
++        : e?.name === 'TimeoutError' || e?.name === 'AbortError' || /fetch|network|timeout/.test(message) ? 'STORAGE_UNREACHABLE'
++        : 'STORAGE_ERROR';
++    // No raw messages, credentials, signed URLs or image contents in logs.
++    console.error(JSON.stringify({ event: 'photo_storage_failed', code, status }));
++    fail(code, code === 'IMAGE_TOO_LARGE' ? 413 : 503);
++}
+--- /dev/null
++++ b/apps/web/src/filters.tsx
+@@ -0,0 +1,49 @@
++import { useState } from 'react';
++import { useTranslation } from 'react-i18next';
++import { useQueryClient } from '@tanstack/react-query';
++import { ArrowLeft, MapPin } from 'lucide-react';
++import { filterSchema, genders, goals } from '../../../packages/shared/validation';
++import { languageNames } from './i18n';
++import { api } from './api';
++import { errorKey } from './main';
++
++export function FilterEditor({ profile, onClose, notice }: { profile: any; onClose: () => void; notice: (s: string) => void }) {
++    const { t } = useTranslation(); const qc = useQueryClient();
++    const [form, setForm] = useState(() => filterSchema.parse(Object.fromEntries(
++        ['interestedIn', 'minAge', 'maxAge', 'maxDistance', 'latitude', 'longitude', 'filterLanguages', 'filterInterests', 'filterGoal'].map(k => [k, profile[k]])
++    )));
++    const [interests, setInterests] = useState(form.filterInterests.join(', '));
++    const [busy, setBusy] = useState(false);
++    const set = (key: string, value: unknown) => setForm(p => ({ ...p, [key]: value }));
++    const toggle = (key: 'interestedIn' | 'filterLanguages', value: string) => {
++        const values: string[] = form[key]; set(key, values.includes(value) ? values.filter(x => x !== value) : [...values, value]);
++    };
++    async function save() {
++        const result = filterSchema.safeParse({ ...form, filterInterests: interests.split(/[,،]/).map(x => x.trim()).filter(Boolean) });
++        if (!result.success) { notice(t('validation')); return; }
++        setBusy(true);
++        try {
++            await api('profile/filters', 'PUT', result.data);
++            await Promise.all([qc.invalidateQueries({ queryKey: ['me'] }), qc.invalidateQueries({ queryKey: ['discovery'] })]);
++            notice(t('saved')); onClose();
++        } catch (error) { notice(t(errorKey(error))); }
++        finally { setBusy(false); }
++    }
++    return <main className="profile-editor">
++        <header className="section-head"><button className="icon" onClick={onClose} aria-label={t('back')} disabled={busy}><ArrowLeft /></button><h1>{t('filters')}</h1></header>
++        <form onSubmit={e => { e.preventDefault(); if (!busy) void save(); }}>
++            <fieldset disabled={busy}><legend>{t('interestedIn')}</legend><div className="choices">{genders.map(g => <label className="choice" key={g}><input type="checkbox" checked={form.interestedIn.includes(g)} onChange={() => toggle('interestedIn', g)}/>{t(g)}</label>)}</div></fieldset>
++            <div className="form-grid">{(['minAge', 'maxAge'] as const).map(k => <label key={k}>{t(k)}<input type="number" required min={18} max={100} value={form[k]} onChange={e => set(k, Number(e.target.value))}/></label>)}</div>
++            <label>{t('maxDistance')}<input type="number" required min={1} max={20000} value={form.maxDistance} onChange={e => set('maxDistance', Number(e.target.value))}/></label>
++            <button type="button" className="secondary" onClick={() => {
++                if (!navigator.geolocation) { notice(t('error')); return; }
++                navigator.geolocation.getCurrentPosition(({ coords }) => setForm(p => ({ ...p, latitude: Math.round(coords.latitude * 100) / 100, longitude: Math.round(coords.longitude * 100) / 100 })), () => notice(t('error')), { timeout: 10000 });
++            }}><MapPin size={18}/>{t('location')}</button>
++            {form.latitude !== null && <button type="button" className="text-button" onClick={() => setForm(p => ({ ...p, latitude: null, longitude: null }))}>{t('clearLocation')}</button>}
++            <fieldset><legend>{t('filterLanguages')}</legend><div className="choices">{Object.entries(languageNames).map(([k, name]) => <label className="choice" key={k}><input type="checkbox" checked={(form.filterLanguages as string[]).includes(k)} onChange={() => toggle('filterLanguages', k)}/>{name}</label>)}</div></fieldset>
++            <label>{t('filterInterests')}<input value={interests} onChange={e => setInterests(e.target.value)} maxLength={400}/></label>
++            <label>{t('goal')}<select value={form.filterGoal || ''} onChange={e => set('filterGoal', e.target.value || null)}><option value="">{t('anyGoal')}</option>{goals.map(k => <option key={k} value={k}>{t(k)}</option>)}</select></label>
++            <button className="primary wide" disabled={busy}>{t(busy ? 'loading' : 'save')}</button>
++        </form>
++    </main>;
++}
+--- a/apps/web/src/locales/ar.json
++++ b/apps/web/src/locales/ar.json
+@@ -176,5 +176,14 @@
+   "fetish": "الفيتيش والتفضيلات الحميمة (اختياري)",
+   "fetishHint": "اختياري، حتى 300 حرف. مخفي عن الآخرين ما لم تفعّل عرضه. مشاركة التفضيلات لا تعني الموافقة.",
+   "showFetish": "إظهار هذه التفضيلات في ملفي",
+-  "CASUAL": "تعارف دون التزام"
++  "CASUAL": "تعارف دون التزام",
++  "photoTooLarge": "اختر صورة أقل من 25 ميغابايت.",
++  "photoInvalid": "تعذر قراءة الصورة. اختر JPEG أو PNG أو WebP.",
++  "photoLimit": "الحد الأقصى 6 صور.",
++  "uploadNetwork": "فشل اتصال الرفع. تحقق من الإنترنت.",
++  "storageConfig": "عنوان تخزين الصور غير صالح. اتصل بالدعم.",
++  "storageBucket": "حاوية الصور غير موجودة. اتصل بالدعم.",
++  "storageAccess": "رُفض الوصول لتخزين الصور. اتصل بالدعم.",
++  "storageType": "يجب السماح بصور WebP. اتصل بالدعم.",
++  "storageNetwork": "تخزين الصور غير متاح. حاول لاحقًا."
+ }
+--- a/apps/web/src/locales/de.json
++++ b/apps/web/src/locales/de.json
+@@ -176,5 +176,14 @@
+   "fetish": "Fetische und intime Vorlieben (optional)",
+   "fetishHint": "Bis zu 300 Zeichen. Für andere verborgen, bis du die Anzeige aktivierst. Vorlieben bedeuten keine Zustimmung.",
+   "showFetish": "Diese Vorlieben in meinem Profil anzeigen",
+-  "CASUAL": "Unverbindliches Dating"
++  "CASUAL": "Unverbindliches Dating",
++  "photoTooLarge": "Wähle ein Foto unter 25 MB.",
++  "photoInvalid": "Foto nicht lesbar. Wähle JPEG, PNG oder WebP.",
++  "photoLimit": "Du kannst bis zu 6 Fotos hinzufügen.",
++  "uploadNetwork": "Upload-Verbindung fehlgeschlagen. Prüfe dein Internet.",
++  "storageConfig": "Ungültige Speicheradresse. Kontaktiere den Support.",
++  "storageBucket": "Fotospeicher nicht gefunden. Kontaktiere den Support.",
++  "storageAccess": "Zugriff auf Fotospeicher verweigert. Kontaktiere den Support.",
++  "storageType": "Der Speicher muss WebP erlauben. Kontaktiere den Support.",
++  "storageNetwork": "Fotospeicher nicht verfügbar. Versuche es später."
+ }
+--- a/apps/web/src/locales/en.json
++++ b/apps/web/src/locales/en.json
+@@ -176,5 +176,14 @@
+   "fetish": "Fetish / intimate preferences (optional)",
+   "fetishHint": "Optional, up to 300 characters. Hidden from other users unless you enable sharing. Sharing preferences never implies consent.",
+   "showFetish": "Show these preferences on my profile",
+-  "CASUAL": "Casual dating"
++  "CASUAL": "Casual dating",
++  "photoTooLarge": "Photo is too large. Choose a file under 25 MB.",
++  "photoInvalid": "Cannot read this photo. Choose JPEG, PNG or WebP.",
++  "photoLimit": "You can add up to 6 profile photos.",
++  "uploadNetwork": "Upload connection failed. Check your internet and try again.",
++  "storageConfig": "Photo storage address is invalid. Contact support.",
++  "storageBucket": "Photo storage bucket was not found. Contact support.",
++  "storageAccess": "Photo storage access was denied. Contact support.",
++  "storageType": "Photo storage must allow WebP images. Contact support.",
++  "storageNetwork": "Photo storage is unavailable. Try again shortly."
+ }
+--- a/apps/web/src/locales/es.json
++++ b/apps/web/src/locales/es.json
+@@ -176,5 +176,14 @@
+   "fetish": "Fetiches y preferencias íntimas (opcional)",
+   "fetishHint": "Hasta 300 caracteres. Oculto a otros salvo que actives su visibilidad. Las preferencias no implican consentimiento.",
+   "showFetish": "Mostrar estas preferencias en mi perfil",
+-  "CASUAL": "Citas sin compromiso"
++  "CASUAL": "Citas sin compromiso",
++  "photoTooLarge": "Elige una foto de menos de 25 MB.",
++  "photoInvalid": "No se puede leer la foto. Elige JPEG, PNG o WebP.",
++  "photoLimit": "Puedes añadir hasta 6 fotos.",
++  "uploadNetwork": "Falló la conexión de subida. Revisa internet.",
++  "storageConfig": "Dirección de almacenamiento inválida. Contacta con soporte.",
++  "storageBucket": "No se encontró el depósito de fotos. Contacta con soporte.",
++  "storageAccess": "Acceso al almacenamiento denegado. Contacta con soporte.",
++  "storageType": "El almacenamiento debe admitir WebP. Contacta con soporte.",
++  "storageNetwork": "Almacenamiento no disponible. Inténtalo más tarde."
+ }
+--- a/apps/web/src/locales/fa.json
++++ b/apps/web/src/locales/fa.json
+@@ -176,5 +176,14 @@
+   "fetish": "فتیش و ترجیحات صمیمی (اختیاری)",
+   "fetishHint": "اختیاری، تا ۳۰۰ کاراکتر. فقط با فعال‌کردن نمایش، دیگر کاربران آن را می‌بینند. بیان ترجیحات به معنی رضایت به هیچ رفتاری نیست.",
+   "showFetish": "نمایش این ترجیحات در پروفایلم",
+-  "CASUAL": "رابطه بدون تعهد"
++  "CASUAL": "رابطه بدون تعهد",
++  "photoTooLarge": "عکس بزرگ است؛ فایل کمتر از ۲۵ مگابایت انتخاب کن.",
++  "photoInvalid": "عکس قابل خواندن نیست؛ JPEG، PNG یا WebP انتخاب کن.",
++  "photoLimit": "حداکثر ۶ عکس پروفایل می‌توانی اضافه کنی.",
++  "uploadNetwork": "اتصال آپلود قطع شد؛ اینترنت را بررسی و دوباره امتحان کن.",
++  "storageConfig": "آدرس فضای عکس نادرست است؛ به پشتیبانی اطلاع بده.",
++  "storageBucket": "باکت عکس پیدا نشد؛ به پشتیبانی اطلاع بده.",
++  "storageAccess": "دسترسی فضای عکس رد شد؛ به پشتیبانی اطلاع بده.",
++  "storageType": "فضای ذخیره باید عکس WebP را بپذیرد؛ به پشتیبانی اطلاع بده.",
++  "storageNetwork": "فضای عکس در دسترس نیست؛ کمی بعد دوباره امتحان کن."
+ }
+--- a/apps/web/src/locales/hi.json
++++ b/apps/web/src/locales/hi.json
+@@ -176,5 +176,14 @@
+   "fetish": "फ़ेटिश और अंतरंग पसंद (वैकल्पिक)",
+   "fetishHint": "अधिकतम 300 अक्षर। दिखाने का विकल्प चुनने तक दूसरों से छिपा रहेगा। पसंद बताना सहमति नहीं है।",
+   "showFetish": "प्रोफ़ाइल पर ये पसंद दिखाएँ",
+-  "CASUAL": "बिना प्रतिबद्धता की डेटिंग"
++  "CASUAL": "बिना प्रतिबद्धता की डेटिंग",
++  "photoTooLarge": "25 MB से छोटी फ़ोटो चुनें।",
++  "photoInvalid": "फ़ोटो नहीं पढ़ी जा सकी। JPEG, PNG या WebP चुनें।",
++  "photoLimit": "अधिकतम 6 फ़ोटो जोड़ सकते हैं।",
++  "uploadNetwork": "अपलोड कनेक्शन विफल। इंटरनेट जाँचें।",
++  "storageConfig": "फ़ोटो स्टोरेज पता गलत है। सहायता से संपर्क करें।",
++  "storageBucket": "फ़ोटो बकेट नहीं मिला। सहायता से संपर्क करें।",
++  "storageAccess": "फ़ोटो स्टोरेज की अनुमति नहीं मिली। सहायता से संपर्क करें।",
++  "storageType": "स्टोरेज में WebP की अनुमति चाहिए। सहायता से संपर्क करें।",
++  "storageNetwork": "फ़ोटो स्टोरेज उपलब्ध नहीं है। बाद में प्रयास करें।"
+ }
+--- a/apps/web/src/locales/it.json
++++ b/apps/web/src/locales/it.json
+@@ -176,5 +176,14 @@
+   "fetish": "Feticci e preferenze intime (facoltativo)",
+   "fetishHint": "Fino a 300 caratteri. Nascosto agli altri finché non attivi la condivisione. Le preferenze non implicano consenso.",
+   "showFetish": "Mostra queste preferenze nel mio profilo",
+-  "CASUAL": "Incontri senza impegno"
++  "CASUAL": "Incontri senza impegno",
++  "photoTooLarge": "Scegli una foto inferiore a 25 MB.",
++  "photoInvalid": "Foto illeggibile. Scegli JPEG, PNG o WebP.",
++  "photoLimit": "Puoi aggiungere fino a 6 foto.",
++  "uploadNetwork": "Connessione di caricamento fallita. Controlla internet.",
++  "storageConfig": "Indirizzo archivio non valido. Contatta il supporto.",
++  "storageBucket": "Archivio foto non trovato. Contatta il supporto.",
++  "storageAccess": "Accesso alle foto negato. Contatta il supporto.",
++  "storageType": "L’archivio deve accettare WebP. Contatta il supporto.",
++  "storageNetwork": "Archivio foto non disponibile. Riprova più tardi."
+ }
+--- a/apps/web/src/locales/ru.json
++++ b/apps/web/src/locales/ru.json
+@@ -176,5 +176,14 @@
+   "fetish": "Фетиши и интимные предпочтения (необязательно)",
+   "fetishHint": "До 300 символов. Скрыто от других, пока вы не включите показ. Предпочтения не означают согласия.",
+   "showFetish": "Показывать эти предпочтения в профиле",
+-  "CASUAL": "Знакомства без обязательств"
++  "CASUAL": "Знакомства без обязательств",
++  "photoTooLarge": "Выберите фото меньше 25 МБ.",
++  "photoInvalid": "Не удалось прочитать фото. Выберите JPEG, PNG или WebP.",
++  "photoLimit": "Можно добавить до 6 фото.",
++  "uploadNetwork": "Ошибка соединения при загрузке. Проверьте интернет.",
++  "storageConfig": "Неверный адрес хранилища. Обратитесь в поддержку.",
++  "storageBucket": "Хранилище фотографий не найдено. Обратитесь в поддержку.",
++  "storageAccess": "Доступ к хранилищу запрещён. Обратитесь в поддержку.",
++  "storageType": "Хранилище должно принимать WebP. Обратитесь в поддержку.",
++  "storageNetwork": "Хранилище недоступно. Повторите позже."
+ }
+--- a/apps/web/src/locales/tr.json
++++ b/apps/web/src/locales/tr.json
+@@ -176,5 +176,14 @@
+   "fetish": "Fetiş ve yakınlık tercihleri (isteğe bağlı)",
+   "fetishHint": "En fazla 300 karakter. Paylaşımı açmadıkça diğer kullanıcılardan gizlidir. Tercihler rıza anlamına gelmez.",
+   "showFetish": "Bu tercihleri profilimde göster",
+-  "CASUAL": "Bağlayıcılığı olmayan flört"
++  "CASUAL": "Bağlayıcılığı olmayan flört",
++  "photoTooLarge": "25 MB altında fotoğraf seçin.",
++  "photoInvalid": "Fotoğraf okunamadı. JPEG, PNG veya WebP seçin.",
++  "photoLimit": "En fazla 6 fotoğraf ekleyebilirsiniz.",
++  "uploadNetwork": "Yükleme bağlantısı başarısız. İnternetinizi kontrol edin.",
++  "storageConfig": "Fotoğraf depolama adresi geçersiz. Destekle iletişime geçin.",
++  "storageBucket": "Fotoğraf deposu bulunamadı. Destekle iletişime geçin.",
++  "storageAccess": "Fotoğraf deposuna erişim reddedildi. Destekle iletişime geçin.",
++  "storageType": "Depo WebP kabul etmeli. Destekle iletişime geçin.",
++  "storageNetwork": "Fotoğraf deposuna ulaşılamıyor. Daha sonra deneyin."
+ }
+--- a/apps/web/src/locales/ur.json
++++ b/apps/web/src/locales/ur.json
+@@ -176,5 +176,14 @@
+   "fetish": "فیٹش اور ذاتی پسند (اختیاری)",
+   "fetishHint": "زیادہ سے زیادہ 300 حروف۔ دکھانے کا اختیار فعال کرنے تک دوسروں سے پوشیدہ۔ پسند بتانا رضامندی نہیں ہے۔",
+   "showFetish": "یہ پسند میرے پروفائل پر دکھائیں",
+-  "CASUAL": "بغیر وابستگی کی ڈیٹنگ"
++  "CASUAL": "بغیر وابستگی کی ڈیٹنگ",
++  "photoTooLarge": "25 MB سے چھوٹی تصویر منتخب کریں۔",
++  "photoInvalid": "تصویر پڑھی نہیں جا سکی۔ JPEG، PNG یا WebP منتخب کریں۔",
++  "photoLimit": "زیادہ سے زیادہ 6 تصاویر شامل کر سکتے ہیں۔",
++  "uploadNetwork": "اپلوڈ کنکشن ناکام۔ انٹرنیٹ چیک کریں۔",
++  "storageConfig": "تصاویر کے ذخیرے کا پتہ غلط ہے۔ سپورٹ سے رابطہ کریں۔",
++  "storageBucket": "تصاویر کی بکٹ نہیں ملی۔ سپورٹ سے رابطہ کریں۔",
++  "storageAccess": "تصاویر کے ذخیرے تک رسائی مسترد۔ سپورٹ سے رابطہ کریں۔",
++  "storageType": "ذخیرے میں WebP کی اجازت ضروری ہے۔ سپورٹ سے رابطہ کریں۔",
++  "storageNetwork": "تصاویر کا ذخیرہ دستیاب نہیں۔ بعد میں کوشش کریں۔"
+ }
+--- a/apps/web/src/locales/zh.json
++++ b/apps/web/src/locales/zh.json
+@@ -176,5 +176,14 @@
+   "fetish": "恋物与亲密偏好（可选）",
+   "fetishHint": "可选，最多300字。仅在开启展示后对其他用户可见。分享偏好不代表同意任何行为。",
+   "showFetish": "在个人资料中展示这些偏好",
+-  "CASUAL": "轻松约会，不求承诺"
++  "CASUAL": "轻松约会，不求承诺",
++  "photoTooLarge": "请选择小于25 MB的照片。",
++  "photoInvalid": "无法读取照片。请选择JPEG、PNG或WebP。",
++  "photoLimit": "最多添加6张照片。",
++  "uploadNetwork": "上传连接失败，请检查网络。",
++  "storageConfig": "照片存储地址无效，请联系支持。",
++  "storageBucket": "找不到照片存储桶，请联系支持。",
++  "storageAccess": "照片存储访问被拒绝，请联系支持。",
++  "storageType": "存储必须允许WebP图片，请联系支持。",
++  "storageNetwork": "照片存储暂不可用，请稍后重试。"
+ }
+--- a/apps/web/src/main.tsx
++++ b/apps/web/src/main.tsx
+@@ -10,10 +10,12 @@
+ import { tg } from './telegram';
+ import { Portrait, Modal, Empty, Loading } from './ui';
+ import { ProfileEditor } from './profile';
++import { FilterEditor } from './filters';
++import { uploadPhoto } from './photo-upload';
+ import { Admin } from './admin';
+ import './styles.css';
+ const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 10000, refetchOnWindowFocus: false } } });
+-export const errorKey = (e: unknown) => { const code = e instanceof ApiError ? e.code : ''; return ({ AUTH_EXPIRED: 'reopen', REOPEN_TELEGRAM: 'reopen', VALIDATION_ERROR: 'validation', DAILY_LIMIT: 'limit', PREMIUM_REQUIRED: 'locked', PROFILE_INCOMPLETE: 'photoRequired', STORAGE_NOT_CONFIGURED: 'storageMissing', TELEGRAM_NOT_CONFIGURED: 'paymentMissing', CHAT_UNAVAILABLE: 'chatUnavailable' } as Record<string, string>)[code] || 'error'; };
++export const errorKey = (e: unknown) => { const code = e instanceof ApiError ? e.code : ''; return ({ AUTH_EXPIRED: 'reopen', REOPEN_TELEGRAM: 'reopen', VALIDATION_ERROR: 'validation', DAILY_LIMIT: 'limit', PREMIUM_REQUIRED: 'locked', PROFILE_INCOMPLETE: 'photoRequired', STORAGE_NOT_CONFIGURED: 'storageMissing', TELEGRAM_NOT_CONFIGURED: 'paymentMissing', CHAT_UNAVAILABLE: 'chatUnavailable', IMAGE_TOO_LARGE: 'photoTooLarge', INVALID_IMAGE: 'photoInvalid', PHOTO_LIMIT: 'photoLimit', UPLOAD_NETWORK: 'uploadNetwork', STORAGE_CONFIG_INVALID: 'storageConfig', STORAGE_BUCKET_MISSING: 'storageBucket', STORAGE_ACCESS_DENIED: 'storageAccess', STORAGE_TYPE_REJECTED: 'storageType', STORAGE_UNREACHABLE: 'storageNetwork', STORAGE_ERROR: 'storageNetwork' } as Record<string, string>)[code] || 'error'; };
+ export function Language({ onChange }: {
+     onChange?: (s: string) => void;
+ }) { const { t, i18n } = useTranslation(); return <label className="language"><span>{t('language')}</span><select value={i18n.language} onChange={e => { changeLanguage(e.target.value); onChange?.(e.target.value); }}>{Object.entries(languageNames).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>; }
+@@ -50,9 +52,10 @@
+     } }
+     return <main className="welcome"><div className="welcome-top"><a className="wordmark" href="/">kisser<span>✳</span></a><span className="pill">18+</span></div><Language /><div className="welcome-art"><Portrait url="seed:0" alt={t('fictional')}/><Portrait url="seed:3" alt={t('fictional')}/><span className="spark">✳</span></div><p className="eyebrow">{t('tagline')}</p><h1>{t('welcome')}</h1><p className="muted">{t('welcomeBody')}</p><button className="primary wide" disabled={busy} onClick={() => void login()}>{busy ? t('loading') : t('login')}<ArrowUpRight /></button>{dev && <div className="dev-box"><small>{t('testMode')}</small><label>{t('testAccount')}<select value={selected} onChange={e => setSelected(e.target.value)}>{q.data?.map(u => <option key={u.telegramId} value={u.telegramId}>{u.firstName} · {u.telegramId}</option>)}</select></label><button className="secondary wide" disabled={busy || !q.data?.length} onClick={() => void login(true)}>{t('testLogin')}</button></div>}<footer><p>{t('adult')}</p><button onClick={() => setLegal('terms')}>{t('terms')}</button><span> · </span><button onClick={() => setLegal('privacy')}>{t('privacy')}</button></footer>{legal && <Legal kind={legal} onClose={() => setLegal(null)}/>}</main>;
+ }
+-function Discover({ notice, openProfile, openChat }: {
++function Discover({ notice, openProfile, openFilters, openChat }: {
+     notice: (s: string) => void;
+     openProfile: () => void;
++    openFilters: () => void;
+     openChat: (id: string) => void;
+ }) {
+     const { t } = useTranslation();
+@@ -81,7 +84,7 @@
+     finally {
+         setBusy(false);
+     } }
+-    return <section><div className="section-head"><div><p className="eyebrow">{t('tagline')}</p><h1>{t('discover')}<span className="accent">.</span></h1></div><button className="icon" aria-label={t('filters')} onClick={openProfile}><SlidersHorizontal /></button></div>{q.isLoading ? <Loading /> : q.error ? <Empty title={t(errorKey(q.error))}><button className="secondary" onClick={openProfile}>{t('editProfile')}</button></Empty> : card ? <><article className="discovery-card" tabIndex={0} onKeyDown={e => { if (e.key === 'ArrowRight')
++    return <section><div className="section-head"><div><p className="eyebrow">{t('tagline')}</p><h1>{t('discover')}<span className="accent">.</span></h1></div><button className="icon" aria-label={t('filters')} onClick={openFilters}><SlidersHorizontal /></button></div>{q.isLoading ? <Loading /> : q.error ? <Empty title={t(errorKey(q.error))}><button className="secondary" onClick={openProfile}>{t('editProfile')}</button></Empty> : card ? <><article className="discovery-card" tabIndex={0} onKeyDown={e => { if (e.key === 'ArrowRight')
+         void swipe('LIKE'); if (e.key === 'ArrowLeft')
+         void swipe('PASS'); }} onPointerDown={e => { pointer.current = e.clientX; }} onPointerUp={e => { if (pointer.current !== null && Math.abs(e.clientX - pointer.current) > 80)
+         void swipe(e.clientX > pointer.current ? 'LIKE' : 'PASS'); pointer.current = null; }}><Portrait url={card.photos[imageIndex]?.url} alt={card.displayName}/><div className="photo-dots">{card.photos.map((p: any, i: number) => <button key={p.id} aria-label={`${t('photo')} ${i + 1}`} className={i === imageIndex ? 'selected' : ''} onClick={() => setImageIndex(i)}/>)}</div><span className="card-label">{card.isTest ? t('fictional') : t(card.goal)}</span><div className="card-copy"><span className="pill glass">{card.city}{card.distance !== null ? ` · ${card.distance} ${t('km')}` : ''}</span><h2>{card.displayName}<span>, {card.age}</span></h2><p>{card.bio}</p>{card.fetish && <p><strong>{t('fetish')}: </strong>{card.fetish}</p>}<div className="chips">{card.interests.slice(0, 4).map((v: string) => <span key={v}>{v}</span>)}</div></div></article><div className="swipe-actions"><button disabled={busy} className="pass" aria-label={t('pass')} onClick={() => void swipe('PASS')}><X size={30}/></button><span>{t('DATING')} · {t('FRIENDSHIP')}</span><button disabled={busy} className="like" aria-label={t('like')} onClick={() => void swipe('LIKE')}><Heart size={29}/></button></div></> : <Empty title={t('noPeople')}><p>{t('noPeopleBody')}</p><button className="secondary" onClick={() => { if (q.data?.nextCursor)
+@@ -153,10 +156,7 @@
+         setBusy(false);
+     } }
+     async function attach(file: File) { setBusy(true); try {
+-        const f = new FormData();
+-        f.append('file', file);
+-        f.append('purpose', 'CHAT');
+-        const p = await api('photos', 'POST', f);
++        const p = await uploadPhoto(file, 'CHAT');
+         const data = { body: '', photoId: p.id, clientId: crypto.randomUUID() };
+         await api(`conversations/${id}/messages`, 'POST', data);
+         await qc.invalidateQueries({ queryKey: ['messages', id] });
+@@ -191,7 +191,7 @@
+         void update({ notifications: true }); });
+ else
+     void update({ notifications: checked }); }}/>{t('notifications')}</label><h3>{t('safety')}</h3><p className="muted">{t('safetyBody')}</p><div className="row">{['terms', 'privacy', 'safety'].map(k => <button className="text-button" key={k} onClick={() => setLegal(k)}>{t(k)}</button>)}</div><h3>{t('blocked')}</h3>{blocked.data?.map(b => <div className="row" key={b.toId}>{b.to.firstName}<button className="text-button" onClick={() => void api(`blocks/${b.toId}`, 'DELETE').then(() => qc.invalidateQueries({ queryKey: ['blocks'] })).catch(e => notice(t(errorKey(e))))}>{t('unblock')}</button></div>)}{me.role === 'ADMIN' && <button className="secondary wide" onClick={onAdmin}><Shield />{t('admin')}</button>}<button className="secondary wide" onClick={() => void api('auth/logout', 'POST').then(onLogout).catch(e => notice(t(errorKey(e))))}><LogOut size={18}/>{t('logout')}</button><button className="danger text-button wide" onClick={() => setDel(true)}>{t('deleteAccount')}</button>{legal && <Legal kind={legal} onClose={() => setLegal(null)}/>}{del && <Modal title={t('deleteAccount')} onClose={() => setDel(false)}><p>{t('deleteWarning')}</p><label>{t('deleteConfirm')}<input dir="ltr" value={confirmText} onChange={e => setConfirmText(e.target.value)}/></label><button className="primary danger-bg wide" disabled={confirmText !== 'DELETE'} onClick={() => void api('users/me', 'DELETE', { confirm: 'DELETE' }).then(() => { onLogout(); notice(t('accountDeleted')); }).catch(e => notice(t(errorKey(e))))}>{t('deleteFinal')}</button></Modal>}</section>; }
+-function App() { const { t } = useTranslation(); const qc = useQueryClient(); const me = useQuery({ queryKey: ['me'], queryFn: () => api('auth/me') }); const [tab, setTab] = useState('discover'), [editing, setEditing] = useState(false), [chat, setChat] = useState<string | null>(null), [toast, setToast] = useState(''); const notice = (s: string) => setToast(s); useEffect(() => { tg()?.ready(); tg()?.expand(); document.documentElement.dataset.theme = localStorage.getItem('vela_theme') || tg()?.colorScheme || 'dark'; }, []); useEffect(() => { if (!toast)
++function App() { const { t } = useTranslation(); const qc = useQueryClient(); const me = useQuery({ queryKey: ['me'], queryFn: () => api('auth/me') }); const [tab, setTab] = useState('discover'), [editing, setEditing] = useState(false), [filtering, setFiltering] = useState(false), [chat, setChat] = useState<string | null>(null), [toast, setToast] = useState(''); const notice = (s: string) => setToast(s); useEffect(() => { tg()?.ready(); tg()?.expand(); document.documentElement.dataset.theme = localStorage.getItem('vela_theme') || tg()?.colorScheme || 'dark'; }, []); useEffect(() => { if (!toast)
+     return; const timer = setTimeout(() => setToast(''), 6000); return () => clearTimeout(timer); }, [toast]); useEffect(() => { if (me.data) {
+     setCsrf(me.data.csrf);
+     changeLanguage(me.data.locale);
+@@ -199,17 +199,19 @@
+     for (const name of ['message', 'match', 'read'])
+         s.on(name, () => { void qc.invalidateQueries({ queryKey: ['conversations'] }); void qc.invalidateQueries({ queryKey: ['messages'] }); });
+     return () => { s.disconnect(); };
+-} }, [me.data?.id, me.data?.csrf]); useEffect(() => { const b = tg()?.BackButton; const back = () => { setChat(null); setEditing(false); setTab('discover'); }; if (chat || editing || tab === 'premium' || tab === 'admin') {
++} }, [me.data?.id, me.data?.csrf]); useEffect(() => { const b = tg()?.BackButton; const back = () => { setChat(null); setEditing(false); setFiltering(false); setTab('discover'); }; if (chat || editing || filtering || tab === 'premium' || tab === 'admin') {
+     b?.show();
+     b?.onClick(back);
+ }
+ else
+-    b?.hide(); return () => b?.offClick(back); }, [chat, editing, tab]); const logout = () => { setCsrf(''); qc.clear(); setTab('discover'); setChat(null); }; let surface; if (me.isLoading)
++    b?.hide(); return () => b?.offClick(back); }, [chat, editing, filtering, tab]); const logout = () => { setCsrf(''); qc.clear(); setTab('discover'); setChat(null); }; let surface; if (me.isLoading)
+     surface = <main className="welcome"><Loading /></main>;
+ else if (!me.data)
+     surface = <Welcome notice={notice} onLogin={() => void qc.invalidateQueries({ queryKey: ['me'] })}/>;
++else if (filtering && me.data.profile)
++    surface = <div className="app-shell"><FilterEditor profile={me.data.profile} notice={notice} onClose={() => setFiltering(false)}/></div>;
+ else if (editing || !me.data.profile)
+     surface = <div className="app-shell"><ProfileEditor me={me.data} notice={notice} onClose={() => { setEditing(false); void qc.invalidateQueries(); }}/></div>;
+ else
+-    surface = <div className="app-shell"><header className="app-header"><a href="/" className="wordmark">kisser<span>✳</span></a><button className="pill" onClick={() => setTab('premium')}><Sparkles size={14}/>{t('premium')}</button></header>{me.data.isTest && <div className="test-ribbon">{t('testMode')}</div>}<main className="content">{chat ? <Chat id={chat} me={me.data} notice={notice} onClose={() => { setChat(null); void qc.invalidateQueries({ queryKey: ['conversations'] }); }}/> : tab === 'discover' ? <Discover notice={notice} openProfile={() => setEditing(true)} openChat={setChat}/> : tab === 'likes' ? <Likes me={me.data} notice={notice} onPremium={() => setTab('premium')}/> : tab === 'chats' ? <Inbox openChat={setChat}/> : tab === 'premium' ? <Premium me={me.data} notice={notice}/> : tab === 'admin' ? <Admin notice={notice}/> : <Account me={me.data} notice={notice} onEdit={() => setEditing(true)} onPremium={() => setTab('premium')} onLogout={logout} onAdmin={() => setTab('admin')}/>}</main>{!chat && <nav className="bottom-nav">{[['discover', Compass], ['likes', Heart], ['chats', MessageCircle], ['profile', UserRound]].map(([k, Icon]) => { const key = k as string; const I = Icon as typeof Compass; return <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}><I size={22}/><span>{t(key)}</span></button>; })}</nav>}</div>; return <>{surface}{toast && <div className="toast" role="status" onClick={() => setToast('')}>{toast}</div>}</>; }
++    surface = <div className="app-shell"><header className="app-header"><a href="/" className="wordmark">kisser<span>✳</span></a><button className="pill" onClick={() => setTab('premium')}><Sparkles size={14}/>{t('premium')}</button></header>{me.data.isTest && <div className="test-ribbon">{t('testMode')}</div>}<main className="content">{chat ? <Chat id={chat} me={me.data} notice={notice} onClose={() => { setChat(null); void qc.invalidateQueries({ queryKey: ['conversations'] }); }}/> : tab === 'discover' ? <Discover notice={notice} openFilters={() => setFiltering(true)} openProfile={() => setEditing(true)} openChat={setChat}/> : tab === 'likes' ? <Likes me={me.data} notice={notice} onPremium={() => setTab('premium')}/> : tab === 'chats' ? <Inbox openChat={setChat}/> : tab === 'premium' ? <Premium me={me.data} notice={notice}/> : tab === 'admin' ? <Admin notice={notice}/> : <Account me={me.data} notice={notice} onEdit={() => setEditing(true)} onPremium={() => setTab('premium')} onLogout={logout} onAdmin={() => setTab('admin')}/>}</main>{!chat && <nav className="bottom-nav">{[['discover', Compass], ['likes', Heart], ['chats', MessageCircle], ['profile', UserRound]].map(([k, Icon]) => { const key = k as string; const I = Icon as typeof Compass; return <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}><I size={22}/><span>{t(key)}</span></button>; })}</nav>}</div>; return <>{surface}{toast && <div className="toast" role="status" onClick={() => setToast('')}>{toast}</div>}</>; }
+ createRoot(document.getElementById('root')!).render(<React.StrictMode><QueryClientProvider client={client}><App /></QueryClientProvider></React.StrictMode>);
+--- /dev/null
++++ b/apps/web/src/photo-upload.ts
+@@ -0,0 +1,35 @@
++import { api, ApiError } from './api';
++
++// Resize before transmission: phone photos need not consume server RAM or upload bandwidth.
++export async function preparePhoto(file: File): Promise<File> {
++    if (!file.size) throw new ApiError('INVALID_IMAGE', 400);
++    if (file.size > 25 * 1024 * 1024) throw new ApiError('IMAGE_TOO_LARGE', 413);
++    const url = URL.createObjectURL(file);
++    const img = new Image();
++    try {
++        await new Promise<void>((resolve, reject) => {
++            const timer = window.setTimeout(() => reject(new ApiError('INVALID_IMAGE', 400)), 15000);
++            img.onload = () => { clearTimeout(timer); resolve(); };
++            img.onerror = () => { clearTimeout(timer); reject(new ApiError('INVALID_IMAGE', 400)); };
++            img.src = url;
++        });
++        const scale = Math.min(1, 1600 / Math.max(img.naturalWidth, img.naturalHeight));
++        const canvas = document.createElement('canvas');
++        canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
++        canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
++        const ctx = canvas.getContext('2d');
++        if (!ctx) throw new ApiError('INVALID_IMAGE', 400);
++        ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
++        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
++        const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.85));
++        if (!blob) throw new ApiError('INVALID_IMAGE', 400);
++        if (blob.size > 5 * 1024 * 1024) throw new ApiError('IMAGE_TOO_LARGE', 413);
++        return new File([blob], 'photo.jpg', { type: 'image/jpeg' });
++    } finally { URL.revokeObjectURL(url); }
++}
++export async function uploadPhoto(file: File, purpose: 'PROFILE' | 'CHAT') {
++    const photo = await preparePhoto(file);
++    const form = new FormData(); form.append('purpose', purpose); form.append('file', photo);
++    try { return await api('photos', 'POST', form); }
++    catch (error) { if (error instanceof ApiError) throw error; throw new ApiError('UPLOAD_NETWORK', 0); }
++}
+--- a/apps/web/src/profile.tsx
++++ b/apps/web/src/profile.tsx
+@@ -3,6 +3,7 @@
+ import { ArrowLeft, Plus, MapPin, Check } from 'lucide-react';
+ import { useQueryClient } from '@tanstack/react-query';
+ import { api } from './api';
++import { uploadPhoto } from './photo-upload';
+ import { Portrait } from './ui';
+ import { languageNames } from './i18n';
+ import { errorKey } from './main';
+@@ -25,10 +26,7 @@
+ finally {
+     setBusy(false);
+ } } async function upload(file: File) { setBusy(true); try {
+-    const f = new FormData();
+-    f.append('file', file);
+-    f.append('purpose', 'PROFILE');
+-    await api('photos', 'POST', f);
++    await uploadPhoto(file, 'PROFILE');
+     await qc.invalidateQueries({ queryKey: ['me'] });
+     notice(t('photoPending'));
+ }
+@@ -37,5 +35,5 @@
+ }
+ finally {
+     setBusy(false);
+-} } const toggle = (key: string, value: string) => set(key, form[key].includes(value) ? form[key].filter((x: string) => x !== value) : [...form[key], value]); return <main className="profile-editor"><header className="section-head"><button className="icon" aria-label={t('back')} onClick={onClose}><ArrowLeft /></button><span className="wordmark">kisser<span>✳</span></span><span className="pill">18+</span></header><p className="eyebrow">{t('profile')}</p><h1>{t(p ? 'editProfile' : 'setupProfile')}</h1><p className="muted">{t('setupBody')}</p><form onSubmit={e => { e.preventDefault(); void save(); }}><div className="form-grid"><label>{t('name')}<input value={form.displayName} onChange={e => set('displayName', e.target.value)} maxLength={40} required/></label><label>{t('birthDate')}<input type="date" required value={form.birthDate} onChange={e => set('birthDate', e.target.value)}/></label></div><label>{t('gender')}<select value={form.gender} onChange={e => set('gender', e.target.value)}>{genders.map(k => <option value={k} key={k}>{t(k)}</option>)}</select></label><fieldset><legend>{t('interestedIn')}</legend><div className="choices">{genders.map(k => <label className="choice" key={k}><input type="checkbox" checked={form.interestedIn.includes(k)} onChange={() => toggle('interestedIn', k)}/>{t(k)}</label>)}</div></fieldset><label>{t('bio')}<textarea value={form.bio} maxLength={500} rows={3} onChange={e => set('bio', e.target.value)}/><small>{form.bio.length}/500</small></label><div className="form-grid">{['city', 'country'].map(k => <label key={k}>{t(k)}<input required value={form[k]} maxLength={80} onChange={e => set(k, e.target.value)}/></label>)}</div><fieldset><legend>{t('languages')}</legend><div className="choices">{Object.entries(languageNames).map(([k, v]) => <label className="choice" key={k}><input type="checkbox" checked={form.languages.includes(k)} onChange={() => toggle('languages', k)}/>{v}</label>)}</div></fieldset><label>{t('interests')}<input value={form.interests.join(', ')} onChange={e => set('interests', e.target.value.split(',').map(x => x.trimStart()))}/></label><label>{t('fetish')}<textarea value={form.fetish} maxLength={300} rows={3} onChange={e => set('fetish', e.target.value)}/><small>{t('fetishHint')}</small></label><label className="check"><input type="checkbox" checked={form.showFetish} onChange={e => set('showFetish', e.target.checked)}/>{t('showFetish')}</label><label>{t('goal')}<select value={form.goal} onChange={e => set('goal', e.target.value)}>{goals.map(k => <option key={k} value={k}>{t(k)}</option>)}</select></label><h2>{t('photos')}</h2><p className="muted">{t('photoHint')}</p><div className="photo-grid">{me.photos?.map((photo: any, i: number) => <div key={photo.id}><Portrait url={photo.url} alt={t('photo')}/><small>{photo.status === 'PENDING' ? t('photoPending') : photo.status === 'REJECTED' ? t('photoRejected') : i === 0 ? '★' : ''}</small><button type="button" className="text-button" disabled={busy} onClick={() => void api(`photos/${photo.id}`, 'DELETE').then(() => qc.invalidateQueries({ queryKey: ['me'] })).catch(e => notice(t(errorKey(e))))}>{t('remove')}</button>{i > 0 && <button type="button" className="text-button" onClick={() => void api('photos/order', 'PUT', { ids: [photo.id, ...me.photos.filter((x: any) => x.id !== photo.id).map((x: any) => x.id)] }).then(() => qc.invalidateQueries({ queryKey: ['me'] })).catch(e => notice(t(errorKey(e))))}>{t('mainPhoto')}</button>}</div>)}{me.photos?.length < 6 && <label className="upload-tile"><Plus /><span>{t('upload')}</span><input type="file" accept="image/jpeg,image/png,image/webp" disabled={busy} hidden onChange={e => { if (e.target.files?.[0])
++} } const toggle = (key: string, value: string) => set(key, form[key].includes(value) ? form[key].filter((x: string) => x !== value) : [...form[key], value]); return <main className="profile-editor"><header className="section-head"><button className="icon" aria-label={t('back')} onClick={onClose}><ArrowLeft /></button><span className="wordmark">kisser<span>✳</span></span><span className="pill">18+</span></header><p className="eyebrow">{t('profile')}</p><h1>{t(p ? 'editProfile' : 'setupProfile')}</h1><p className="muted">{t('setupBody')}</p><form onSubmit={e => { e.preventDefault(); void save(); }}><div className="form-grid"><label>{t('name')}<input value={form.displayName} onChange={e => set('displayName', e.target.value)} maxLength={40} required/></label><label>{t('birthDate')}<input type="date" required value={form.birthDate} onChange={e => set('birthDate', e.target.value)}/></label></div><label>{t('gender')}<select value={form.gender} onChange={e => set('gender', e.target.value)}>{genders.map(k => <option value={k} key={k}>{t(k)}</option>)}</select></label><fieldset><legend>{t('interestedIn')}</legend><div className="choices">{genders.map(k => <label className="choice" key={k}><input type="checkbox" checked={form.interestedIn.includes(k)} onChange={() => toggle('interestedIn', k)}/>{t(k)}</label>)}</div></fieldset><label>{t('bio')}<textarea value={form.bio} maxLength={500} rows={3} onChange={e => set('bio', e.target.value)}/><small>{form.bio.length}/500</small></label><div className="form-grid">{['city', 'country'].map(k => <label key={k}>{t(k)}<input required value={form[k]} maxLength={80} onChange={e => set(k, e.target.value)}/></label>)}</div><fieldset><legend>{t('languages')}</legend><div className="choices">{Object.entries(languageNames).map(([k, v]) => <label className="choice" key={k}><input type="checkbox" checked={form.languages.includes(k)} onChange={() => toggle('languages', k)}/>{v}</label>)}</div></fieldset><label>{t('interests')}<input value={form.interests.join(', ')} onChange={e => set('interests', e.target.value.split(',').map(x => x.trimStart()))}/></label><label>{t('fetish')}<textarea value={form.fetish} maxLength={300} rows={3} onChange={e => set('fetish', e.target.value)}/><small>{t('fetishHint')}</small></label><label className="check"><input type="checkbox" checked={form.showFetish} onChange={e => set('showFetish', e.target.checked)}/>{t('showFetish')}</label><label>{t('goal')}<select value={form.goal} onChange={e => set('goal', e.target.value)}>{goals.map(k => <option key={k} value={k}>{t(k)}</option>)}</select></label><h2>{t('photos')}</h2><p className="muted">{t('photoHint')}</p><div className="photo-grid">{me.photos?.map((photo: any, i: number) => <div key={photo.id}><Portrait url={photo.url} alt={t('photo')}/><small>{photo.status === 'PENDING' ? t('photoPending') : photo.status === 'REJECTED' ? t('photoRejected') : i === 0 ? '★' : ''}</small><button type="button" className="text-button" disabled={busy} onClick={() => void api(`photos/${photo.id}`, 'DELETE').then(() => qc.invalidateQueries({ queryKey: ['me'] })).catch(e => notice(t(errorKey(e))))}>{t('remove')}</button>{i > 0 && <button type="button" className="text-button" onClick={() => void api('photos/order', 'PUT', { ids: [photo.id, ...me.photos.filter((x: any) => x.id !== photo.id).map((x: any) => x.id)] }).then(() => qc.invalidateQueries({ queryKey: ['me'] })).catch(e => notice(t(errorKey(e))))}>{t('mainPhoto')}</button>}</div>)}{(me.photos?.length || 0) < 6 && <label className="upload-tile"><Plus /><span role="status">{t(busy ? 'loading' : 'upload')}</span><input type="file" accept="image/jpeg,image/png,image/webp" disabled={busy} hidden onChange={e => { if (e.target.files?.[0])
+     void upload(e.target.files[0]); e.target.value = ''; }}/></label>}</div><h2>{t('filters')}</h2><div className="form-grid">{['minAge', 'maxAge'].map(k => <label key={k}>{t(k)}<input type="number" min={18} max={100} value={form[k]} onChange={e => set(k, Number(e.target.value))}/></label>)}</div><label>{t('maxDistance')}<input type="number" min={1} max={20000} value={form.maxDistance} onChange={e => set('maxDistance', Number(e.target.value))}/></label><button type="button" className="secondary" onClick={() => navigator.geolocation.getCurrentPosition(loc => { setForm((s: any) => ({ ...s, latitude: Math.round(loc.coords.latitude * 100) / 100, longitude: Math.round(loc.coords.longitude * 100) / 100 })); notice(t('locationSaved')); }, () => notice(t('error')), { enableHighAccuracy: false, timeout: 10000 })}><MapPin size={17}/>{t('location')}</button>{form.latitude !== null && <button type="button" className="text-button" onClick={() => setForm((s: any) => ({ ...s, latitude: null, longitude: null }))}>{t('clearLocation')}</button>}<fieldset><legend>{t('filterLanguages')}</legend><div className="choices">{Object.entries(languageNames).map(([k, v]) => <label className="choice" key={k}><input type="checkbox" checked={form.filterLanguages.includes(k)} onChange={() => toggle('filterLanguages', k)}/>{v}</label>)}</div></fieldset><label>{t('filterInterests')}<input value={form.filterInterests.join(', ')} onChange={e => set('filterInterests', e.target.value ? e.target.value.split(',').map(x => x.trimStart()) : [])}/></label><label>{t('goal')}<select value={form.filterGoal || ''} onChange={e => set('filterGoal', e.target.value || null)}><option value="">{t('anyGoal')}</option>{goals.map(k => <option key={k} value={k}>{t(k)}</option>)}</select></label><label className="check"><input type="checkbox" checked={form.visible} onChange={e => set('visible', e.target.checked)}/>{t('visible')}</label><label className="check"><input type="checkbox" required checked={form.terms} onChange={e => set('terms', e.target.checked)}/>{t('termsAgree')}</label><button className="primary wide" disabled={busy}><Check size={18}/>{t(busy ? 'loading' : 'save')}</button></form></main>; }
+--- a/packages/shared/validation.ts
++++ b/packages/shared/validation.ts
+@@ -28,3 +28,13 @@
+     longitude: number | null;
+ }) { if (a.latitude === null || a.longitude === null || b.latitude === null || b.longitude === null)
+     return null; const r = Math.PI / 180, dLat = (b.latitude - a.latitude) * r, dLon = (b.longitude - a.longitude) * r; const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.latitude * r) * Math.cos(b.latitude * r) * Math.sin(dLon / 2) ** 2; return 6371 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(Math.max(0, 1 - h))); }
++
++export const filterSchema = z.object({
++    interestedIn: z.array(z.enum(genders)).min(1).max(3),
++    minAge: z.number().int().min(18).max(100), maxAge: z.number().int().min(18).max(100),
++    maxDistance: z.number().int().min(1).max(20000),
++    latitude: z.number().min(-90).max(90).nullable(), longitude: z.number().min(-180).max(180).nullable(),
++    filterLanguages: z.array(z.enum(locales)).max(11),
++    filterInterests: z.array(z.string().trim().min(1).max(30)).max(12),
++    filterGoal: z.enum(goals).nullable(),
++}).strict().refine(p => p.minAge <= p.maxAge, 'AGE_RANGE').refine(p => (p.latitude === null) === (p.longitude === null), 'LOCATION_PAIR');
+--- /dev/null
++++ b/tests/upload-filters.test.ts
+@@ -0,0 +1,45 @@
++import { test } from 'node:test';
++import assert from 'node:assert/strict';
++import sharp from 'sharp';
++import { databaseHarness } from './database-harness';
++import { useTestDatabase } from '../apps/api/src/db';
++import { upload, saveFilters, storage } from '../apps/api/src/profiles';
++import { storageFailure } from '../apps/api/src/storage-errors';
++import { filterSchema } from '../packages/shared/validation';
++
++test('Upload transforms a real image and saves private metadata; filters preserve profile fields', async () => {
++    process.env.NODE_ENV = 'test';
++    const h = await databaseHarness(); useTestDatabase(h.client);
++    const original = global.fetch;
++    process.env.SUPABASE_URL = 'https://test.supabase.co';
++    process.env.SUPABASE_SERVICE_ROLE_KEY = 'server-test-key';
++    process.env.SUPABASE_STORAGE_BUCKET = 'dating-app-photos';
++    const requests: string[] = [];
++    global.fetch = async (input) => { requests.push(String(input)); return new Response(JSON.stringify({ Key: 'ok' }), { status: 200, headers: { 'Content-Type': 'application/json' } }); };
++    try {
++        const u = await h.client.user.create({ data: { telegramId: '333', firstName: 'Adult' } });
++        const filters = { interestedIn: ['OTHER'], minAge: 18, maxAge: 60, maxDistance: 100, latitude: null, longitude: null, filterLanguages: [], filterInterests: [], filterGoal: null };
++        await h.client.profile.create({ data: { userId: u.id, displayName: 'Adult', birthDate: new Date('1990-01-01'), gender: 'OTHER', city: 'City', country: 'Country', languages: ['en'], interests: ['Music'], fetish: 'Private', ...filters } });
++        const buffer = await sharp({ create: { width: 2200, height: 1100, channels: 3, background: '#4488aa' } }).jpeg().toBuffer();
++        const photo = await upload(u.id, { buffer, size: buffer.length } as Express.Multer.File, 'PROFILE');
++        assert.equal(photo.status, 'PENDING'); assert.equal(photo.userId, u.id);
++        assert.ok(photo.path.endsWith('.webp'));
++        assert.ok(requests[0].includes('/storage/v1/object/dating-app-photos/'));
++        await assert.rejects(() => upload(u.id, { buffer: Buffer.from('not a photo'), size: 11 } as Express.Multer.File, 'PROFILE'));
++        await saveFilters(u.id, { ...filters, minAge: 25, filterGoal: 'CASUAL' });
++        const p = await h.client.profile.findUniqueOrThrow({ where: { userId: u.id } });
++        assert.equal(p.minAge, 25); assert.equal(p.filterGoal, 'CASUAL');
++        assert.equal(p.displayName, 'Adult'); assert.equal(p.fetish, 'Private'); assert.deepEqual(p.interests, ['Music']);
++        assert.equal(filterSchema.safeParse({ ...filters, displayName: 'Overwrite' }).success, false);
++        assert.equal(filterSchema.safeParse({ ...filters, minAge: 50, maxAge: 20 }).success, false);
++        global.fetch = async () => new Response(JSON.stringify({ statusCode: '403', message: 'Unauthorized', error: 'Forbidden' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
++        await assert.rejects(() => upload(u.id, { buffer, size: buffer.length } as Express.Multer.File, 'PROFILE'), (error: any) => error.getResponse().code === 'STORAGE_ACCESS_DENIED');
++        assert.equal(await h.client.photo.count(), 1);
++    } finally { global.fetch = original; await h.close(); }
++});
++test('Storage configuration and bucket errors are actionable without raw secrets', () => {
++    process.env.SUPABASE_URL = 'postgresql://private:secret@host/db';
++    process.env.SUPABASE_SERVICE_ROLE_KEY = 'test';
++    assert.throws(() => storage(), (e: any) => e.getResponse().code === 'STORAGE_CONFIG_INVALID');
++    assert.throws(() => storageFailure({ statusCode: '404', message: 'Bucket not found' }), (e: any) => e.getResponse().code === 'STORAGE_BUCKET_MISSING');
++});

@@ -176,5 +176,14 @@
   "fetish": "Feticci e preferenze intime (facoltativo)",
   "fetishHint": "Fino a 300 caratteri. Nascosto agli altri finché non attivi la condivisione. Le preferenze non implicano consenso.",
   "showFetish": "Mostra queste preferenze nel mio profilo",
-  "CASUAL": "Incontri senza impegno"
+  "CASUAL": "Incontri senza impegno",
+  "photoTooLarge": "Scegli una foto inferiore a 25 MB.",
+  "photoInvalid": "Foto illeggibile. Scegli JPEG, PNG o WebP.",
+  "photoLimit": "Puoi aggiungere fino a 6 foto.",
+  "uploadNetwork": "Connessione di caricamento fallita. Controlla internet.",
+  "storageConfig": "Indirizzo archivio non valido. Contatta il supporto.",
+  "storageBucket": "Archivio foto non trovato. Contatta il supporto.",
+  "storageAccess": "Accesso alle foto negato. Contatta il supporto.",
+  "storageType": "L’archivio deve accettare WebP. Contatta il supporto.",
+  "storageNetwork": "Archivio foto non disponibile. Riprova più tardi."
 }

@@ -176,5 +176,14 @@
   "fetish": "恋物与亲密偏好（可选）",
   "fetishHint": "可选，最多300字。仅在开启展示后对其他用户可见。分享偏好不代表同意任何行为。",
   "showFetish": "在个人资料中展示这些偏好",
-  "CASUAL": "轻松约会，不求承诺"
+  "CASUAL": "轻松约会，不求承诺",
+  "photoTooLarge": "请选择小于25 MB的照片。",
+  "photoInvalid": "无法读取照片。请选择JPEG、PNG或WebP。",
+  "photoLimit": "最多添加6张照片。",
+  "uploadNetwork": "上传连接失败，请检查网络。",
+  "storageConfig": "照片存储地址无效，请联系支持。",
+  "storageBucket": "找不到照片存储桶，请联系支持。",
+  "storageAccess": "照片存储访问被拒绝，请联系支持。",
+  "storageType": "存储必须允许WebP图片，请联系支持。",
+  "storageNetwork": "照片存储暂不可用，请稍后重试。"
 }

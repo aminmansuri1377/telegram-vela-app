@@ -10,10 +10,12 @@ import { api, base, setCsrf, getCsrf, ApiError } from './api';
 import { tg } from './telegram';
 import { Portrait, Modal, Empty, Loading } from './ui';
 import { ProfileEditor } from './profile';
+import { FilterEditor } from './filters';
+import { uploadPhoto } from './photo-upload';
 import { Admin } from './admin';
 import './styles.css';
 const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 10000, refetchOnWindowFocus: false } } });
-export const errorKey = (e: unknown) => { const code = e instanceof ApiError ? e.code : ''; return ({ AUTH_EXPIRED: 'reopen', REOPEN_TELEGRAM: 'reopen', VALIDATION_ERROR: 'validation', DAILY_LIMIT: 'limit', PREMIUM_REQUIRED: 'locked', PROFILE_INCOMPLETE: 'photoRequired', STORAGE_NOT_CONFIGURED: 'storageMissing', TELEGRAM_NOT_CONFIGURED: 'paymentMissing', CHAT_UNAVAILABLE: 'chatUnavailable' } as Record<string, string>)[code] || 'error'; };
+export const errorKey = (e: unknown) => { const code = e instanceof ApiError ? e.code : ''; return ({ AUTH_EXPIRED: 'reopen', REOPEN_TELEGRAM: 'reopen', VALIDATION_ERROR: 'validation', DAILY_LIMIT: 'limit', PREMIUM_REQUIRED: 'locked', PROFILE_INCOMPLETE: 'photoRequired', STORAGE_NOT_CONFIGURED: 'storageMissing', TELEGRAM_NOT_CONFIGURED: 'paymentMissing', CHAT_UNAVAILABLE: 'chatUnavailable', IMAGE_TOO_LARGE: 'photoTooLarge', INVALID_IMAGE: 'photoInvalid', PHOTO_LIMIT: 'photoLimit', UPLOAD_NETWORK: 'uploadNetwork', STORAGE_CONFIG_INVALID: 'storageConfig', STORAGE_BUCKET_MISSING: 'storageBucket', STORAGE_ACCESS_DENIED: 'storageAccess', STORAGE_TYPE_REJECTED: 'storageType', STORAGE_UNREACHABLE: 'storageNetwork', STORAGE_ERROR: 'storageNetwork' } as Record<string, string>)[code] || 'error'; };
 export function Language({ onChange }: {
     onChange?: (s: string) => void;
 }) { const { t, i18n } = useTranslation(); return <label className="language"><span>{t('language')}</span><select value={i18n.language} onChange={e => { changeLanguage(e.target.value); onChange?.(e.target.value); }}>{Object.entries(languageNames).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>; }
@@ -50,9 +52,10 @@ function Welcome({ onLogin, notice }: {
     } }
     return <main className="welcome"><div className="welcome-top"><a className="wordmark" href="/">kisser<span>✳</span></a><span className="pill">18+</span></div><Language /><div className="welcome-art"><Portrait url="seed:0" alt={t('fictional')}/><Portrait url="seed:3" alt={t('fictional')}/><span className="spark">✳</span></div><p className="eyebrow">{t('tagline')}</p><h1>{t('welcome')}</h1><p className="muted">{t('welcomeBody')}</p><button className="primary wide" disabled={busy} onClick={() => void login()}>{busy ? t('loading') : t('login')}<ArrowUpRight /></button>{dev && <div className="dev-box"><small>{t('testMode')}</small><label>{t('testAccount')}<select value={selected} onChange={e => setSelected(e.target.value)}>{q.data?.map(u => <option key={u.telegramId} value={u.telegramId}>{u.firstName} · {u.telegramId}</option>)}</select></label><button className="secondary wide" disabled={busy || !q.data?.length} onClick={() => void login(true)}>{t('testLogin')}</button></div>}<footer><p>{t('adult')}</p><button onClick={() => setLegal('terms')}>{t('terms')}</button><span> · </span><button onClick={() => setLegal('privacy')}>{t('privacy')}</button></footer>{legal && <Legal kind={legal} onClose={() => setLegal(null)}/>}</main>;
 }
-function Discover({ notice, openProfile, openChat }: {
+function Discover({ notice, openProfile, openFilters, openChat }: {
     notice: (s: string) => void;
     openProfile: () => void;
+    openFilters: () => void;
     openChat: (id: string) => void;
 }) {
     const { t } = useTranslation();
@@ -81,7 +84,7 @@ function Discover({ notice, openProfile, openChat }: {
     finally {
         setBusy(false);
     } }
-    return <section><div className="section-head"><div><p className="eyebrow">{t('tagline')}</p><h1>{t('discover')}<span className="accent">.</span></h1></div><button className="icon" aria-label={t('filters')} onClick={openProfile}><SlidersHorizontal /></button></div>{q.isLoading ? <Loading /> : q.error ? <Empty title={t(errorKey(q.error))}><button className="secondary" onClick={openProfile}>{t('editProfile')}</button></Empty> : card ? <><article className="discovery-card" tabIndex={0} onKeyDown={e => { if (e.key === 'ArrowRight')
+    return <section><div className="section-head"><div><p className="eyebrow">{t('tagline')}</p><h1>{t('discover')}<span className="accent">.</span></h1></div><button className="icon" aria-label={t('filters')} onClick={openFilters}><SlidersHorizontal /></button></div>{q.isLoading ? <Loading /> : q.error ? <Empty title={t(errorKey(q.error))}><button className="secondary" onClick={openProfile}>{t('editProfile')}</button></Empty> : card ? <><article className="discovery-card" tabIndex={0} onKeyDown={e => { if (e.key === 'ArrowRight')
         void swipe('LIKE'); if (e.key === 'ArrowLeft')
         void swipe('PASS'); }} onPointerDown={e => { pointer.current = e.clientX; }} onPointerUp={e => { if (pointer.current !== null && Math.abs(e.clientX - pointer.current) > 80)
         void swipe(e.clientX > pointer.current ? 'LIKE' : 'PASS'); pointer.current = null; }}><Portrait url={card.photos[imageIndex]?.url} alt={card.displayName}/><div className="photo-dots">{card.photos.map((p: any, i: number) => <button key={p.id} aria-label={`${t('photo')} ${i + 1}`} className={i === imageIndex ? 'selected' : ''} onClick={() => setImageIndex(i)}/>)}</div><span className="card-label">{card.isTest ? t('fictional') : t(card.goal)}</span><div className="card-copy"><span className="pill glass">{card.city}{card.distance !== null ? ` · ${card.distance} ${t('km')}` : ''}</span><h2>{card.displayName}<span>, {card.age}</span></h2><p>{card.bio}</p>{card.fetish && <p><strong>{t('fetish')}: </strong>{card.fetish}</p>}<div className="chips">{card.interests.slice(0, 4).map((v: string) => <span key={v}>{v}</span>)}</div></div></article><div className="swipe-actions"><button disabled={busy} className="pass" aria-label={t('pass')} onClick={() => void swipe('PASS')}><X size={30}/></button><span>{t('DATING')} · {t('FRIENDSHIP')}</span><button disabled={busy} className="like" aria-label={t('like')} onClick={() => void swipe('LIKE')}><Heart size={29}/></button></div></> : <Empty title={t('noPeople')}><p>{t('noPeopleBody')}</p><button className="secondary" onClick={() => { if (q.data?.nextCursor)
@@ -153,10 +156,7 @@ function Chat({ id, me, notice, onClose }: {
         setBusy(false);
     } }
     async function attach(file: File) { setBusy(true); try {
-        const f = new FormData();
-        f.append('file', file);
-        f.append('purpose', 'CHAT');
-        const p = await api('photos', 'POST', f);
+        const p = await uploadPhoto(file, 'CHAT');
         const data = { body: '', photoId: p.id, clientId: crypto.randomUUID() };
         await api(`conversations/${id}/messages`, 'POST', data);
         await qc.invalidateQueries({ queryKey: ['messages', id] });
@@ -191,7 +191,7 @@ catch (e) {
         void update({ notifications: true }); });
 else
     void update({ notifications: checked }); }}/>{t('notifications')}</label><h3>{t('safety')}</h3><p className="muted">{t('safetyBody')}</p><div className="row">{['terms', 'privacy', 'safety'].map(k => <button className="text-button" key={k} onClick={() => setLegal(k)}>{t(k)}</button>)}</div><h3>{t('blocked')}</h3>{blocked.data?.map(b => <div className="row" key={b.toId}>{b.to.firstName}<button className="text-button" onClick={() => void api(`blocks/${b.toId}`, 'DELETE').then(() => qc.invalidateQueries({ queryKey: ['blocks'] })).catch(e => notice(t(errorKey(e))))}>{t('unblock')}</button></div>)}{me.role === 'ADMIN' && <button className="secondary wide" onClick={onAdmin}><Shield />{t('admin')}</button>}<button className="secondary wide" onClick={() => void api('auth/logout', 'POST').then(onLogout).catch(e => notice(t(errorKey(e))))}><LogOut size={18}/>{t('logout')}</button><button className="danger text-button wide" onClick={() => setDel(true)}>{t('deleteAccount')}</button>{legal && <Legal kind={legal} onClose={() => setLegal(null)}/>}{del && <Modal title={t('deleteAccount')} onClose={() => setDel(false)}><p>{t('deleteWarning')}</p><label>{t('deleteConfirm')}<input dir="ltr" value={confirmText} onChange={e => setConfirmText(e.target.value)}/></label><button className="primary danger-bg wide" disabled={confirmText !== 'DELETE'} onClick={() => void api('users/me', 'DELETE', { confirm: 'DELETE' }).then(() => { onLogout(); notice(t('accountDeleted')); }).catch(e => notice(t(errorKey(e))))}>{t('deleteFinal')}</button></Modal>}</section>; }
-function App() { const { t } = useTranslation(); const qc = useQueryClient(); const me = useQuery({ queryKey: ['me'], queryFn: () => api('auth/me') }); const [tab, setTab] = useState('discover'), [editing, setEditing] = useState(false), [chat, setChat] = useState<string | null>(null), [toast, setToast] = useState(''); const notice = (s: string) => setToast(s); useEffect(() => { tg()?.ready(); tg()?.expand(); document.documentElement.dataset.theme = localStorage.getItem('vela_theme') || tg()?.colorScheme || 'dark'; }, []); useEffect(() => { if (!toast)
+function App() { const { t } = useTranslation(); const qc = useQueryClient(); const me = useQuery({ queryKey: ['me'], queryFn: () => api('auth/me') }); const [tab, setTab] = useState('discover'), [editing, setEditing] = useState(false), [filtering, setFiltering] = useState(false), [chat, setChat] = useState<string | null>(null), [toast, setToast] = useState(''); const notice = (s: string) => setToast(s); useEffect(() => { tg()?.ready(); tg()?.expand(); document.documentElement.dataset.theme = localStorage.getItem('vela_theme') || tg()?.colorScheme || 'dark'; }, []); useEffect(() => { if (!toast)
     return; const timer = setTimeout(() => setToast(''), 6000); return () => clearTimeout(timer); }, [toast]); useEffect(() => { if (me.data) {
     setCsrf(me.data.csrf);
     changeLanguage(me.data.locale);
@@ -199,17 +199,19 @@ function App() { const { t } = useTranslation(); const qc = useQueryClient(); co
     for (const name of ['message', 'match', 'read'])
         s.on(name, () => { void qc.invalidateQueries({ queryKey: ['conversations'] }); void qc.invalidateQueries({ queryKey: ['messages'] }); });
     return () => { s.disconnect(); };
-} }, [me.data?.id, me.data?.csrf]); useEffect(() => { const b = tg()?.BackButton; const back = () => { setChat(null); setEditing(false); setTab('discover'); }; if (chat || editing || tab === 'premium' || tab === 'admin') {
+} }, [me.data?.id, me.data?.csrf]); useEffect(() => { const b = tg()?.BackButton; const back = () => { setChat(null); setEditing(false); setFiltering(false); setTab('discover'); }; if (chat || editing || filtering || tab === 'premium' || tab === 'admin') {
     b?.show();
     b?.onClick(back);
 }
 else
-    b?.hide(); return () => b?.offClick(back); }, [chat, editing, tab]); const logout = () => { setCsrf(''); qc.clear(); setTab('discover'); setChat(null); }; let surface; if (me.isLoading)
+    b?.hide(); return () => b?.offClick(back); }, [chat, editing, filtering, tab]); const logout = () => { setCsrf(''); qc.clear(); setTab('discover'); setChat(null); }; let surface; if (me.isLoading)
     surface = <main className="welcome"><Loading /></main>;
 else if (!me.data)
     surface = <Welcome notice={notice} onLogin={() => void qc.invalidateQueries({ queryKey: ['me'] })}/>;
+else if (filtering && me.data.profile)
+    surface = <div className="app-shell"><FilterEditor profile={me.data.profile} notice={notice} onClose={() => setFiltering(false)}/></div>;
 else if (editing || !me.data.profile)
     surface = <div className="app-shell"><ProfileEditor me={me.data} notice={notice} onClose={() => { setEditing(false); void qc.invalidateQueries(); }}/></div>;
 else
-    surface = <div className="app-shell"><header className="app-header"><a href="/" className="wordmark">kisser<span>✳</span></a><button className="pill" onClick={() => setTab('premium')}><Sparkles size={14}/>{t('premium')}</button></header>{me.data.isTest && <div className="test-ribbon">{t('testMode')}</div>}<main className="content">{chat ? <Chat id={chat} me={me.data} notice={notice} onClose={() => { setChat(null); void qc.invalidateQueries({ queryKey: ['conversations'] }); }}/> : tab === 'discover' ? <Discover notice={notice} openProfile={() => setEditing(true)} openChat={setChat}/> : tab === 'likes' ? <Likes me={me.data} notice={notice} onPremium={() => setTab('premium')}/> : tab === 'chats' ? <Inbox openChat={setChat}/> : tab === 'premium' ? <Premium me={me.data} notice={notice}/> : tab === 'admin' ? <Admin notice={notice}/> : <Account me={me.data} notice={notice} onEdit={() => setEditing(true)} onPremium={() => setTab('premium')} onLogout={logout} onAdmin={() => setTab('admin')}/>}</main>{!chat && <nav className="bottom-nav">{[['discover', Compass], ['likes', Heart], ['chats', MessageCircle], ['profile', UserRound]].map(([k, Icon]) => { const key = k as string; const I = Icon as typeof Compass; return <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}><I size={22}/><span>{t(key)}</span></button>; })}</nav>}</div>; return <>{surface}{toast && <div className="toast" role="status" onClick={() => setToast('')}>{toast}</div>}</>; }
+    surface = <div className="app-shell"><header className="app-header"><a href="/" className="wordmark">kisser<span>✳</span></a><button className="pill" onClick={() => setTab('premium')}><Sparkles size={14}/>{t('premium')}</button></header>{me.data.isTest && <div className="test-ribbon">{t('testMode')}</div>}<main className="content">{chat ? <Chat id={chat} me={me.data} notice={notice} onClose={() => { setChat(null); void qc.invalidateQueries({ queryKey: ['conversations'] }); }}/> : tab === 'discover' ? <Discover notice={notice} openFilters={() => setFiltering(true)} openProfile={() => setEditing(true)} openChat={setChat}/> : tab === 'likes' ? <Likes me={me.data} notice={notice} onPremium={() => setTab('premium')}/> : tab === 'chats' ? <Inbox openChat={setChat}/> : tab === 'premium' ? <Premium me={me.data} notice={notice}/> : tab === 'admin' ? <Admin notice={notice}/> : <Account me={me.data} notice={notice} onEdit={() => setEditing(true)} onPremium={() => setTab('premium')} onLogout={logout} onAdmin={() => setTab('admin')}/>}</main>{!chat && <nav className="bottom-nav">{[['discover', Compass], ['likes', Heart], ['chats', MessageCircle], ['profile', UserRound]].map(([k, Icon]) => { const key = k as string; const I = Icon as typeof Compass; return <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}><I size={22}/><span>{t(key)}</span></button>; })}</nav>}</div>; return <>{surface}{toast && <div className="toast" role="status" onClick={() => setToast('')}>{toast}</div>}</>; }
 createRoot(document.getElementById('root')!).render(<React.StrictMode><QueryClientProvider client={client}><App /></QueryClientProvider></React.StrictMode>);

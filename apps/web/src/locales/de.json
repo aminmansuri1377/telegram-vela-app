@@ -176,5 +176,14 @@
   "fetish": "Fetische und intime Vorlieben (optional)",
   "fetishHint": "Bis zu 300 Zeichen. Für andere verborgen, bis du die Anzeige aktivierst. Vorlieben bedeuten keine Zustimmung.",
   "showFetish": "Diese Vorlieben in meinem Profil anzeigen",
-  "CASUAL": "Unverbindliches Dating"
+  "CASUAL": "Unverbindliches Dating",
+  "photoTooLarge": "Wähle ein Foto unter 25 MB.",
+  "photoInvalid": "Foto nicht lesbar. Wähle JPEG, PNG oder WebP.",
+  "photoLimit": "Du kannst bis zu 6 Fotos hinzufügen.",
+  "uploadNetwork": "Upload-Verbindung fehlgeschlagen. Prüfe dein Internet.",
+  "storageConfig": "Ungültige Speicheradresse. Kontaktiere den Support.",
+  "storageBucket": "Fotospeicher nicht gefunden. Kontaktiere den Support.",
+  "storageAccess": "Zugriff auf Fotospeicher verweigert. Kontaktiere den Support.",
+  "storageType": "Der Speicher muss WebP erlauben. Kontaktiere den Support.",
+  "storageNetwork": "Fotospeicher nicht verfügbar. Versuche es später."
 }

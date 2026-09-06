@@ -47,8 +47,8 @@ else {
 async function session(req: Request, write = false) { const s = await auth.requireSession(req, write); await rate(`user:${s.userId}`, 180, 60); return s; }
 @Catch()
 class Errors implements ExceptionFilter {
-    catch(error: unknown, host: ArgumentsHost) { const res = host.switchToHttp().getResponse<Response>(); const req = host.switchToHttp().getRequest<Request>(); const status = error instanceof ZodError ? 400 : error instanceof HttpException ? error.getStatus() : 500; const response = error instanceof HttpException ? error.getResponse() : null; const code = error instanceof ZodError ? 'VALIDATION_ERROR' : typeof response === 'object' && response && 'code' in response ? response.code : 'SERVER_ERROR'; if (status >= 500)
-        process.stderr.write(JSON.stringify({ event: 'request_failed', requestId: req.headers['x-request-id'], path: req.path, status }) + '\n'); res.status(status).json({ code, requestId: req.headers['x-request-id'], ...(error instanceof ZodError ? { fields: error.issues.map(x => ({ path: x.path.join('.'), code: x.code })) } : {}) }); }
+    catch(error: unknown, host: ArgumentsHost) { const res = host.switchToHttp().getResponse<Response>(); const req = host.switchToHttp().getRequest<Request>(); const status = error instanceof ZodError ? 400 : error instanceof HttpException ? error.getStatus() : 500; const response = error instanceof HttpException ? error.getResponse() : null; const code = status === 413 ? 'IMAGE_TOO_LARGE' : error instanceof ZodError ? 'VALIDATION_ERROR' : typeof response === 'object' && response && 'code' in response ? response.code : 'SERVER_ERROR'; if (status >= 500)
+        process.stderr.write(JSON.stringify({ event: 'request_failed', requestId: req.headers['x-request-id'], path: req.path, status, code }) + '\n'); res.status(status).json({ code, requestId: req.headers['x-request-id'], ...(error instanceof ZodError ? { fields: error.issues.map(x => ({ path: x.path.join('.'), code: x.code })) } : {}) }); }
 }
 @ApiTags('Kisser')
 @Controller('api/v1')
@@ -108,6 +108,8 @@ class Api {
     b: unknown, 
     @Res({ passthrough: true })
     res: Response) { const s = await session(req, true); z.object({ confirm: z.literal('DELETE') }).parse(b); await profiles.deleteAccount(s.userId); res.clearCookie(auth.cookieName, { path: '/' }); return { ok: true }; }
+    @Put('profile/filters')
+    async filters(@Req() req: Request, @Body() body: unknown) { return profiles.saveFilters((await session(req, true)).userId, body); }
     @Post('photos')
     @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 1 } }))
     async upload(

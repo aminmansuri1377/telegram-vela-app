@@ -176,5 +176,14 @@
   "fetish": "Fetiş ve yakınlık tercihleri (isteğe bağlı)",
   "fetishHint": "En fazla 300 karakter. Paylaşımı açmadıkça diğer kullanıcılardan gizlidir. Tercihler rıza anlamına gelmez.",
   "showFetish": "Bu tercihleri profilimde göster",
-  "CASUAL": "Bağlayıcılığı olmayan flört"
+  "CASUAL": "Bağlayıcılığı olmayan flört",
+  "photoTooLarge": "25 MB altında fotoğraf seçin.",
+  "photoInvalid": "Fotoğraf okunamadı. JPEG, PNG veya WebP seçin.",
+  "photoLimit": "En fazla 6 fotoğraf ekleyebilirsiniz.",
+  "uploadNetwork": "Yükleme bağlantısı başarısız. İnternetinizi kontrol edin.",
+  "storageConfig": "Fotoğraf depolama adresi geçersiz. Destekle iletişime geçin.",
+  "storageBucket": "Fotoğraf deposu bulunamadı. Destekle iletişime geçin.",
+  "storageAccess": "Fotoğraf deposuna erişim reddedildi. Destekle iletişime geçin.",
+  "storageType": "Depo WebP kabul etmeli. Destekle iletişime geçin.",
+  "storageNetwork": "Fotoğraf deposuna ulaşılamıyor. Daha sonra deneyin."
 }
