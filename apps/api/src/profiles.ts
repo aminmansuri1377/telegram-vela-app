@@ -1,3 +1,4 @@
+import { demoAccess, demoPairAllowed } from './demo';
 import { db, lockUsers, Tx } from './db';
 import { fail } from './security';
 import { ageAt, entitlement, distanceKm, profileSchema, locales } from '../../../packages/shared/validation';
@@ -40,16 +41,16 @@ export async function publicProfile(u: Candidate, viewer?: Profile | null) { con
     return null; const km = viewer ? distanceKm(viewer, p) : null; return { id: u.id, displayName: p.displayName, age: ageAt(p.birthDate), gender: p.gender, bio: p.bio, city: p.city, country: p.country, languages: p.languages, interests: p.interests, ...(p.showFetish ? { fetish: p.fetish } : {}), goal: p.goal, isTest: u.isTest, distance: km === null ? null : Math.max(5, Math.round(km / 5) * 5), photos: await Promise.all(u.photos.filter(x => x.status === 'APPROVED' && x.purpose === 'PROFILE').map(async (x) => ({ id: x.id, url: await photoUrl(x) }))) }; }
 export const candidateInclude = { profile: true, photos: { where: { status: 'APPROVED', purpose: 'PROFILE' }, orderBy: { position: 'asc' as const } } };
 export async function eligible(tx: Tx, a: string, b: string) { if (a === b)
-    fail('INVALID_TARGET'); const users = await tx.user.findMany({ where: { id: { in: [a, b] }, banned: false }, include: { profile: true, photos: { where: { status: 'APPROVED', purpose: 'PROFILE' } } } }); if (users.length !== 2 || users.some(u => !u.profile || !u.profile.visible || !u.photos.length || !u.termsAt))
+    fail('INVALID_TARGET'); const users = await tx.user.findMany({ where: { id: { in: [a, b] }, banned: false }, include: { profile: true, photos: { where: { status: 'APPROVED', purpose: 'PROFILE' } } } }); if (users.length === 2 && !demoPairAllowed(users[0], users[1])) fail('PROFILE_UNAVAILABLE', 404); if (users.length !== 2 || users.some(u => !u.profile || !u.profile.visible || !u.photos.length && !demoAccess(u) || !u.termsAt))
     fail('PROFILE_UNAVAILABLE', 404); const block = await tx.block.findFirst({ where: { OR: [{ fromId: a, toId: b }, { fromId: b, toId: a }] } }); if (block)
     fail('PROFILE_UNAVAILABLE', 404); return users; }
 export async function discovery(userId: string, cursor?: string) {
     const own = await db.user.findUniqueOrThrow({ where: { id: userId }, include: { profile: true, photos: true } });
-    if (!own.profile || !own.photos.some(p => p.status === 'APPROVED' && p.purpose === 'PROFILE'))
+    if (!own.profile || !demoAccess(own) && !own.photos.some(p => p.status === 'APPROVED' && p.purpose === 'PROFILE'))
         fail('PROFILE_INCOMPLETE', 409);
     const p = own.profile;
     const age = ageAt(p.birthDate);
-    const rows = await db.user.findMany({ where: { id: { not: userId, ...(cursor ? { gt: cursor } : {}) }, banned: false, isTest: process.env.NODE_ENV === 'production' ? false : undefined, termsAt: { not: null }, profile: { is: { visible: true, gender: { in: p.interestedIn }, interestedIn: { has: p.gender }, minAge: { lte: age }, maxAge: { gte: age } } }, received: { none: { fromId: userId } }, blockedBy: { none: { fromId: userId } }, blocks: { none: { toId: userId } }, reported: { none: { fromId: userId } }, reports: { none: { toId: userId } }, photos: { some: { status: 'APPROVED', purpose: 'PROFILE' } } }, include: candidateInclude, orderBy: { id: 'asc' }, take: 200 });
+    const rows = await db.user.findMany({ where: { id: { not: userId, ...(cursor ? { gt: cursor } : {}) }, banned: false, isTest: demoAccess(own) ? true : process.env.NODE_ENV === 'production' ? false : undefined, termsAt: { not: null }, profile: { is: { visible: true, gender: { in: p.interestedIn }, interestedIn: { has: p.gender }, minAge: { lte: age }, maxAge: { gte: age } } }, received: { none: { fromId: userId } }, blockedBy: { none: { fromId: userId } }, blocks: { none: { toId: userId } }, reported: { none: { fromId: userId } }, reports: { none: { toId: userId } }, photos: { some: { status: 'APPROVED', purpose: 'PROFILE' } } }, include: candidateInclude, orderBy: { id: 'asc' }, take: 200 });
     const filtered = rows.filter(u => { const q = u.profile!; const d = distanceKm(p, q); return ageAt(q.birthDate) >= p.minAge && ageAt(q.birthDate) <= p.maxAge && (p.latitude === null || d !== null && d <= p.maxDistance) && (!p.filterLanguages.length || p.filterLanguages.some(x => q.languages.includes(x))) && (!p.filterInterests.length || p.filterInterests.some(x => q.interests.includes(x))) && (!p.filterGoal || p.filterGoal === q.goal); });
     filtered.sort((a, b) => Number(!!b.premiumUntil && b.premiumUntil > new Date()) - Number(!!a.premiumUntil && a.premiumUntil > new Date()));
     return { items: await Promise.all(filtered.map(u => publicProfile(u, p))), nextCursor: rows.length === 200 ? rows[rows.length - 1].id : null };

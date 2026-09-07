@@ -1,0 +1,141 @@
+--- /dev/null
++++ b/apps/api/src/demo.ts
+@@ -0,0 +1,7 @@
++export function demoAccess(user: { telegramId: string; isTest?: boolean }) {
++    return !user.isTest && process.env.DEMO_PROFILES_ENABLED === 'true' &&
++        (process.env.DEMO_TELEGRAM_IDS || '').split(',').map(x => x.trim()).filter(Boolean).includes(user.telegramId);
++}
++export function demoPairAllowed(a: { telegramId: string; isTest: boolean }, b: { telegramId: string; isTest: boolean }) {
++    return process.env.NODE_ENV !== 'production' || !a.isTest && !b.isTest || a.isTest && demoAccess(b) || b.isTest && demoAccess(a);
++}
+--- a/apps/api/src/profiles.ts
++++ b/apps/api/src/profiles.ts
+@@ -1,3 +1,4 @@
++import { demoAccess, demoPairAllowed } from './demo';
+ import { db, lockUsers, Tx } from './db';
+ import { fail } from './security';
+ import { ageAt, entitlement, distanceKm, profileSchema, locales } from '../../../packages/shared/validation';
+@@ -40,16 +41,16 @@
+     return null; const km = viewer ? distanceKm(viewer, p) : null; return { id: u.id, displayName: p.displayName, age: ageAt(p.birthDate), gender: p.gender, bio: p.bio, city: p.city, country: p.country, languages: p.languages, interests: p.interests, ...(p.showFetish ? { fetish: p.fetish } : {}), goal: p.goal, isTest: u.isTest, distance: km === null ? null : Math.max(5, Math.round(km / 5) * 5), photos: await Promise.all(u.photos.filter(x => x.status === 'APPROVED' && x.purpose === 'PROFILE').map(async (x) => ({ id: x.id, url: await photoUrl(x) }))) }; }
+ export const candidateInclude = { profile: true, photos: { where: { status: 'APPROVED', purpose: 'PROFILE' }, orderBy: { position: 'asc' as const } } };
+ export async function eligible(tx: Tx, a: string, b: string) { if (a === b)
+-    fail('INVALID_TARGET'); const users = await tx.user.findMany({ where: { id: { in: [a, b] }, banned: false }, include: { profile: true, photos: { where: { status: 'APPROVED', purpose: 'PROFILE' } } } }); if (users.length !== 2 || users.some(u => !u.profile || !u.profile.visible || !u.photos.length || !u.termsAt))
++    fail('INVALID_TARGET'); const users = await tx.user.findMany({ where: { id: { in: [a, b] }, banned: false }, include: { profile: true, photos: { where: { status: 'APPROVED', purpose: 'PROFILE' } } } }); if (users.length === 2 && !demoPairAllowed(users[0], users[1])) fail('PROFILE_UNAVAILABLE', 404); if (users.length !== 2 || users.some(u => !u.profile || !u.profile.visible || !u.photos.length && !demoAccess(u) || !u.termsAt))
+     fail('PROFILE_UNAVAILABLE', 404); const block = await tx.block.findFirst({ where: { OR: [{ fromId: a, toId: b }, { fromId: b, toId: a }] } }); if (block)
+     fail('PROFILE_UNAVAILABLE', 404); return users; }
+ export async function discovery(userId: string, cursor?: string) {
+     const own = await db.user.findUniqueOrThrow({ where: { id: userId }, include: { profile: true, photos: true } });
+-    if (!own.profile || !own.photos.some(p => p.status === 'APPROVED' && p.purpose === 'PROFILE'))
++    if (!own.profile || !demoAccess(own) && !own.photos.some(p => p.status === 'APPROVED' && p.purpose === 'PROFILE'))
+         fail('PROFILE_INCOMPLETE', 409);
+     const p = own.profile;
+     const age = ageAt(p.birthDate);
+-    const rows = await db.user.findMany({ where: { id: { not: userId, ...(cursor ? { gt: cursor } : {}) }, banned: false, isTest: process.env.NODE_ENV === 'production' ? false : undefined, termsAt: { not: null }, profile: { is: { visible: true, gender: { in: p.interestedIn }, interestedIn: { has: p.gender }, minAge: { lte: age }, maxAge: { gte: age } } }, received: { none: { fromId: userId } }, blockedBy: { none: { fromId: userId } }, blocks: { none: { toId: userId } }, reported: { none: { fromId: userId } }, reports: { none: { toId: userId } }, photos: { some: { status: 'APPROVED', purpose: 'PROFILE' } } }, include: candidateInclude, orderBy: { id: 'asc' }, take: 200 });
++    const rows = await db.user.findMany({ where: { id: { not: userId, ...(cursor ? { gt: cursor } : {}) }, banned: false, isTest: demoAccess(own) ? true : process.env.NODE_ENV === 'production' ? false : undefined, termsAt: { not: null }, profile: { is: { visible: true, gender: { in: p.interestedIn }, interestedIn: { has: p.gender }, minAge: { lte: age }, maxAge: { gte: age } } }, received: { none: { fromId: userId } }, blockedBy: { none: { fromId: userId } }, blocks: { none: { toId: userId } }, reported: { none: { fromId: userId } }, reports: { none: { toId: userId } }, photos: { some: { status: 'APPROVED', purpose: 'PROFILE' } } }, include: candidateInclude, orderBy: { id: 'asc' }, take: 200 });
+     const filtered = rows.filter(u => { const q = u.profile!; const d = distanceKm(p, q); return ageAt(q.birthDate) >= p.minAge && ageAt(q.birthDate) <= p.maxAge && (p.latitude === null || d !== null && d <= p.maxDistance) && (!p.filterLanguages.length || p.filterLanguages.some(x => q.languages.includes(x))) && (!p.filterInterests.length || p.filterInterests.some(x => q.interests.includes(x))) && (!p.filterGoal || p.filterGoal === q.goal); });
+     filtered.sort((a, b) => Number(!!b.premiumUntil && b.premiumUntil > new Date()) - Number(!!a.premiumUntil && a.premiumUntil > new Date()));
+     return { items: await Promise.all(filtered.map(u => publicProfile(u, p))), nextCursor: rows.length === 200 ? rows[rows.length - 1].id : null };
+--- a/apps/api/src/social.ts
++++ b/apps/api/src/social.ts
+@@ -1,3 +1,4 @@
++import { demoAccess, demoPairAllowed } from './demo';
+ import { db, lockUsers, Tx } from './db';
+ import { fail } from './security';
+ import { eligible, publicProfile, candidateInclude, policyFor, photoUrl } from './profiles';
+@@ -5,18 +6,18 @@
+ import { z } from 'zod';
+ import { randomUUID } from 'node:crypto';
+ export const events = { emit: (_ids: string[], _event: string, _payload: unknown) => { } };
+-export async function swipe(userId: string, body: unknown) { const { toId, kind } = z.object({ toId: z.string().uuid(), kind: z.enum(['LIKE', 'PASS']) }).strict().parse(body); const [aId, bId] = orderedPair(userId, toId); const result = await db.$transaction(async (tx) => { await lockUsers(tx, [aId, bId]); const users = await eligible(tx, userId, toId); await tx.swipe.upsert({ where: { fromId_toId: { fromId: userId, toId } }, create: { fromId: userId, toId, kind }, update: {} }); const mine = await tx.swipe.findUniqueOrThrow({ where: { fromId_toId: { fromId: userId, toId } } }); const other = await tx.swipe.findUnique({ where: { fromId_toId: { fromId: toId, toId: userId } } }); if (mine.kind !== 'LIKE' || other?.kind !== 'LIKE')
++export async function swipe(userId: string, body: unknown) { const { toId, kind } = z.object({ toId: z.string().uuid(), kind: z.enum(['LIKE', 'PASS']) }).strict().parse(body); const [aId, bId] = orderedPair(userId, toId); const result = await db.$transaction(async (tx) => { await lockUsers(tx, [aId, bId]); const users = await eligible(tx, userId, toId); await tx.swipe.upsert({ where: { fromId_toId: { fromId: userId, toId } }, create: { fromId: userId, toId, kind }, update: {} }); const mine = await tx.swipe.findUniqueOrThrow({ where: { fromId_toId: { fromId: userId, toId } } }); if (kind === 'LIKE' && users.some(u => u.id === userId && demoAccess(u)) && users.some(u => u.id === toId && u.isTest)) await tx.swipe.upsert({ where: { fromId_toId: { fromId: toId, toId: userId } }, create: { fromId: toId, toId: userId, kind: 'LIKE' }, update: {} }); const other = await tx.swipe.findUnique({ where: { fromId_toId: { fromId: toId, toId: userId } } }); if (mine.kind !== 'LIKE' || other?.kind !== 'LIKE')
+     return { match: null }; const existing = await tx.conversation.findUnique({ where: { aId_bId: { aId, bId } } }); if (existing)
+     return { match: existing.active ? existing.id : null }; const conversation = await tx.conversation.create({ data: { aId, bId } }); for (const u of users)
+     if (u.notifications && !u.isTest)
+         await tx.outbox.create({ data: { kind: 'NOTIFY', payload: { telegramId: u.telegramId, locale: u.locale } } }); return { match: conversation.id }; }); if (result.match)
+     events.emit([aId, bId], 'match', result); return result; }
+ export async function likes(userId: string) { const own = await db.user.findUniqueOrThrow({ where: { id: userId }, include: { profile: true } }); if (!(await policyFor(own)).seeLikes)
+-    fail('PREMIUM_REQUIRED', 402); const rows = await db.swipe.findMany({ where: { toId: userId, kind: 'LIKE', from: { banned: false, profile: { is: { visible: true } }, blocks: { none: { toId: userId } }, blockedBy: { none: { fromId: userId } }, received: { none: { fromId: userId } } } }, include: { from: { include: candidateInclude } }, take: 100 }); return Promise.all(rows.map(x => publicProfile(x.from, own.profile))); }
++    fail('PREMIUM_REQUIRED', 402); const rows = await db.swipe.findMany({ where: { toId: userId, kind: 'LIKE', from: { isTest: process.env.NODE_ENV === 'production' && !demoAccess(own) ? false : undefined, banned: false, profile: { is: { visible: true } }, blocks: { none: { toId: userId } }, blockedBy: { none: { fromId: userId } }, received: { none: { fromId: userId } } } }, include: { from: { include: candidateInclude } }, take: 100 }); return Promise.all(rows.map(x => publicProfile(x.from, own.profile))); }
+ export async function member(tx: Tx, userId: string, id: string) { const c = await tx.conversation.findUnique({ where: { id }, include: { a: true, b: true } }); if (!c || !c.active || ![c.aId, c.bId].includes(userId) || c.a.banned || c.b.banned)
+-    fail('CHAT_UNAVAILABLE', 404); const blocked = await tx.block.findFirst({ where: { OR: [{ fromId: c.aId, toId: c.bId }, { fromId: c.bId, toId: c.aId }] } }); if (blocked)
++    fail('CHAT_UNAVAILABLE', 404); const blocked = await tx.block.findFirst({ where: { OR: [{ fromId: c.aId, toId: c.bId }, { fromId: c.bId, toId: c.aId }] } }); if (blocked || !demoPairAllowed(c.a, c.b))
+     fail('CHAT_UNAVAILABLE', 404); return c; }
+-export async function conversations(userId: string) { const rows = await db.conversation.findMany({ where: { active: true, OR: [{ aId: userId }, { bId: userId }], a: { banned: false }, b: { banned: false } }, include: { a: { include: candidateInclude }, b: { include: candidateInclude }, messages: { orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 1 } }, orderBy: { createdAt: 'desc' }, take: 100 }); return Promise.all(rows.map(async (c) => ({ id: c.id, other: await publicProfile(c.aId === userId ? c.b : c.a), last: c.messages[0] || null, readAt: c.aId === userId ? c.readAAt : c.readBAt, otherReadAt: c.aId === userId ? c.readBAt : c.readAAt }))); }
++export async function conversations(userId: string) { const rows = await db.conversation.findMany({ where: { active: true, OR: [{ aId: userId }, { bId: userId }], a: { banned: false }, b: { banned: false } }, include: { a: { include: candidateInclude }, b: { include: candidateInclude }, messages: { orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 1 } }, orderBy: { createdAt: 'desc' }, take: 100 }); const viewer = await db.user.findUniqueOrThrow({ where: { id: userId } }); return Promise.all(rows.filter(c => demoPairAllowed(viewer, c.aId === userId ? c.b : c.a)).map(async (c) => ({ id: c.id, other: await publicProfile(c.aId === userId ? c.b : c.a), last: c.messages[0] || null, readAt: c.aId === userId ? c.readAAt : c.readBAt, otherReadAt: c.aId === userId ? c.readBAt : c.readAAt }))); }
+ export async function history(userId: string, id: string, cursor?: string) { await member(db, userId, id); const pivot = cursor ? await db.message.findFirst({ where: { id: cursor, conversationId: id } }) : null; if (cursor && !pivot)
+     fail('INVALID_CURSOR'); const rows = await db.message.findMany({ where: { conversationId: id, ...(pivot ? { OR: [{ createdAt: { lt: pivot.createdAt } }, { createdAt: pivot.createdAt, id: { lt: pivot.id } }] } : {}) }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 40 }); return { items: await Promise.all(rows.map(async (m) => ({ ...m, image: m.photoId ? await db.photo.findUnique({ where: { id: m.photoId } }).then(p => p ? photoUrl(p) : null) : null }))), nextCursor: rows.length === 40 ? rows[rows.length - 1].id : null }; }
+ export async function sendMessage(userId: string, id: string, body: unknown) {
+@@ -43,7 +44,11 @@
+             await tx.dailyUsage.update({ where: { userId_day: { userId, day } }, data: { starts: { increment: 1 } } });
+             await tx.conversation.update({ where: { id }, data: { startedAt: new Date(), startedBy: userId } });
+         }
+-        return tx.message.create({ data: { id: randomUUID(), conversationId: id, senderId: userId, ...data } });
++        const message = await tx.message.create({ data: { id: randomUUID(), conversationId: id, senderId: userId, ...data } });
++        const sender = current.aId === userId ? current.a : current.b;
++        const recipient = current.aId === userId ? current.b : current.a;
++        if (demoAccess(sender) && recipient.isTest) await tx.message.create({ data: { conversationId: id, senderId: recipient.id, clientId: data.clientId, body: '[DEMO / آزمایشی] پیام شما دریافت شد. این پاسخ خودکار یک پروفایل ساختگی برای تست چت است.' } });
++        return message;
+     });
+     events.emit([c.aId, c.bId], 'message', { conversationId: id });
+     return result;
+--- /dev/null
++++ b/scripts/seed-staging.ts
+@@ -0,0 +1,31 @@
++import { config } from 'dotenv';
++import { resolve } from 'node:path';
++import { PrismaClient } from '@prisma/client';
++config({ path: resolve(__dirname, '../.env') });
++const db = new PrismaClient({ datasources: { db: { url: process.env.DIRECT_URL || process.env.DATABASE_URL } } });
++async function run() {
++    if (process.env.DEMO_PROFILES_ENABLED !== 'true') throw new Error('Set DEMO_PROFILES_ENABLED=true and DEMO_TELEGRAM_IDS in .env first.');
++    const ids = (process.env.DEMO_TELEGRAM_IDS || '').split(',').map(x => x.trim()).filter(Boolean);
++    if (!ids.length || ids.some(x => !/^\d+$/.test(x))) throw new Error('DEMO_TELEGRAM_IDS must contain numeric Telegram user IDs.');
++    const owner = await db.user.findFirst({ where: { telegramId: { in: ids }, isTest: false }, include: { profile: true } });
++    if (!owner?.profile) throw new Error('First sign in through Telegram and complete a real tester profile.');
++    const p = owner.profile;
++    const women = ['Lina','Maya','Nora','Sofia','Darya','Sara','Mina','Leila','Zara','Emma','Giulia','Aisha','Mei','Priya','Alina','Clara','Elena','Yasmin','Luna','Nadia'];
++    const men = ['Adrian','Arman','Leo','Deniz','Omar','Alex','Ravi','Luca','Daniel','Wei'];
++    await db.$transaction(async tx => {
++        for (let i = 0; i < 30; i++) {
++            const female = i < 20, n = female ? i : i - 20;
++            const telegramId = `test-${female ? 'woman' : 'man'}-${String(n + 1).padStart(2, '0')}`;
++            const name = (female ? women : men)[n];
++            const existing = await tx.user.findUnique({ where: { telegramId } });
++            if (existing && !existing.isTest) throw new Error('A reserved demo identifier belongs to a non-test account.');
++            const user = await tx.user.upsert({ where: { telegramId }, create: { telegramId, firstName: name, isTest: true, termsAt: new Date(), termsVersion: '1.0', notifications: false }, update: { firstName: name, role: 'USER', notifications: false } });
++            const profile = { displayName: name, birthDate: new Date(`${1990 + i % 10}-06-15`), gender: female ? 'FEMALE' : 'MALE', interestedIn: ['MALE','FEMALE','OTHER'], bio: `Fictional test profile. I enjoy ${['music and coffee','travel and photography','books and cooking'][i % 3]}. Likes and chat replies are simulated.`, city: p.city, country: p.country, languages: [...new Set([...p.languages, 'en'])], interests: [['Music','Coffee'],['Travel','Photography'],['Books','Cooking']][i % 3], goal: ['DATING','FRIENDSHIP','CHAT','RELATIONSHIP','CASUAL'][i % 5], minAge: 18, maxAge: 100, visible: true, latitude: p.latitude, longitude: p.longitude };
++            await tx.profile.upsert({ where: { userId: user.id }, create: { userId: user.id, ...profile }, update: profile });
++            const path = `seed:${female ? n % 3 : 3 + n % 3}:${user.id}`;
++            await tx.photo.upsert({ where: { path }, create: { userId: user.id, path, purpose: 'PROFILE', status: 'APPROVED' }, update: { status: 'APPROVED' } });
++        }
++    }, { timeout: 120000, maxWait: 10000 });
++    console.log('Ready: 20 fictional women and 10 fictional men. Existing swipes/messages were preserved. Render must have the same DEMO settings.');
++}
++run().catch(error => { console.error(error instanceof Error && !('code' in error) && !error.message.includes('prisma') ? error.message : 'Demo seed failed. Check database connectivity and migrations.'); process.exitCode = 1; }).finally(() => db.$disconnect());
+--- /dev/null
++++ b/tests/demo.test.ts
+@@ -0,0 +1,24 @@
++import { test } from 'node:test';
++import assert from 'node:assert/strict';
++import { randomUUID } from 'node:crypto';
++import { databaseHarness } from './database-harness';
++import { useTestDatabase } from '../apps/api/src/db';
++import { seed } from '../prisma/seed';
++import { swipe, sendMessage, history } from '../apps/api/src/social';
++import { demoAccess } from '../apps/api/src/demo';
++test('Allowlisted Telegram tester can match and receive one demo reply per message; disabling gates access', async () => {
++    process.env.NODE_ENV = 'test'; const h = await databaseHarness(); useTestDatabase(h.client);
++    try {
++        await seed(h.client);
++        const owner = await h.client.user.update({ where: { telegramId: 'test-man-01' }, data: { telegramId: '98765', isTest: false } });
++        const target = await h.client.user.findUniqueOrThrow({ where: { telegramId: 'test-woman-10' } });
++        process.env.NODE_ENV = 'production'; process.env.DEMO_PROFILES_ENABLED = 'true'; process.env.DEMO_TELEGRAM_IDS = '98765';
++        assert.equal(demoAccess(owner), true); assert.equal(demoAccess(target), false);
++        const m = await swipe(owner.id, { toId: target.id, kind: 'LIKE' }); assert.ok(m.match);
++        const body = { body: 'Hello test', clientId: randomUUID() };
++        await sendMessage(owner.id, m.match!, body); await sendMessage(owner.id, m.match!, body);
++        assert.equal(await h.client.message.count({ where: { conversationId: m.match! } }), 2);
++        process.env.DEMO_PROFILES_ENABLED = 'false';
++        await assert.rejects(() => history(owner.id, m.match!));
++    } finally { process.env.NODE_ENV = 'test'; delete process.env.DEMO_PROFILES_ENABLED; delete process.env.DEMO_TELEGRAM_IDS; await h.close(); }
++});
